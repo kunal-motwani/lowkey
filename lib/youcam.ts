@@ -10,40 +10,72 @@ import { localSkinTone } from "./tone-local";
  */
 
 const BASE = process.env.YOUCAM_API_BASE || "https://yce-api-01.makeupar.com";
-const CACHE_DIR = path.join(process.cwd(), "cache");
+/** Cache directory: FLATTR_CACHE_DIR override (tests, custom deploys), default <cwd>/cache. */
+const cacheDir = () => process.env.FLATTR_CACHE_DIR || path.join(process.cwd(), "cache");
 
-export const sha = (b: Buffer | string) =>
-  crypto.createHash("sha1").update(b).digest("hex").slice(0, 16);
+export const sha = (b: Buffer | string) => crypto.createHash("sha1").update(b).digest("hex").slice(0, 16);
 
 export function cacheGet<T>(key: string): T | null {
   try {
-    return JSON.parse(fs.readFileSync(path.join(CACHE_DIR, key + ".json"), "utf8")) as T;
+    return JSON.parse(fs.readFileSync(path.join(cacheDir(), key + ".json"), "utf8")) as T;
   } catch {
     return null;
   }
 }
 export function cachePut(key: string, val: unknown) {
   try {
-    fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(CACHE_DIR, key + ".json"), JSON.stringify(val));
+    fs.mkdirSync(cacheDir(), { recursive: true });
+    fs.writeFileSync(path.join(cacheDir(), key + ".json"), JSON.stringify(val));
   } catch {
     /* read-only FS (Vercel) - in-memory only */
   }
 }
 export function cacheGetBin(key: string): Buffer | null {
   try {
-    return fs.readFileSync(path.join(CACHE_DIR, key));
+    return fs.readFileSync(path.join(cacheDir(), key));
   } catch {
     return null;
   }
 }
 export function cachePutBin(key: string, b: Buffer) {
   try {
-    fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(path.join(CACHE_DIR, key), b);
+    fs.mkdirSync(cacheDir(), { recursive: true });
+    fs.writeFileSync(path.join(cacheDir(), key), b);
   } catch {
     /* ignore */
   }
+}
+
+/** Shapes of the YouCam v2.0 s2s responses we rely on. */
+interface YouCamEnvelope {
+  status?: number;
+  error?: string;
+  error_code?: string;
+}
+interface FileInitResponse {
+  data: {
+    files: {
+      file_id: string;
+      requests: { url: string; method?: string; headers?: Record<string, string> }[];
+    }[];
+  };
+}
+interface TaskCreateResponse {
+  data: { task_id: string };
+}
+export interface TaskResults {
+  output?: { type: string; ui_score: number }[];
+  color?: ToneResult;
+  url?: string;
+}
+export interface TaskData {
+  task_status?: string;
+  error_message?: string;
+  error?: string;
+  results?: TaskResults | { download_url?: string }[];
+}
+interface TaskPollResponse {
+  data?: TaskData;
 }
 
 const mem = new Map<string, unknown>();
@@ -55,8 +87,7 @@ const KEY_ENV: Record<string, string> = {
   "cloth-v4": "YOUCAM_KEY_CLOTHES",
   "makeup-vto": "YOUCAM_KEY_MAKEUP",
 };
-export const hasYoucamKey = () =>
-  !!process.env.YOUCAM_API_KEY || Object.values(KEY_ENV).some((e) => !!process.env[e]);
+export const hasYoucamKey = () => !!process.env.YOUCAM_API_KEY || Object.values(KEY_ENV).some((e) => !!process.env[e]);
 
 function headers(kind: string) {
   const name = KEY_ENV[kind];
@@ -72,9 +103,9 @@ async function api<T>(kind: string, method: string, p: string, body?: unknown): 
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
-  let json: any;
+  let json: YouCamEnvelope;
   try {
-    json = JSON.parse(text);
+    json = JSON.parse(text) as YouCamEnvelope;
   } catch {
     throw new Error(`YouCam ${p} -> ${res.status} ${text.slice(0, 200)}`);
   }
@@ -89,7 +120,7 @@ export async function uploadFile(buf: Buffer, kind: string, contentType = "image
   const key = `file_${kind}_` + sha(buf);
   const hit = mem.get(key) as string | undefined;
   if (hit) return hit;
-  const init = await api<any>(kind, "POST", "/s2s/v2.0/file", {
+  const init = await api<FileInitResponse>(kind, "POST", "/s2s/v2.0/file", {
     files: [{ content_type: contentType, file_name: name, file_size: buf.length }],
   });
   const f = init.data.files[0];
@@ -105,18 +136,18 @@ export async function uploadFile(buf: Buffer, kind: string, contentType = "image
 }
 
 export async function createTask(kind: string, body: Record<string, unknown>) {
-  const r = await api<any>(kind, "POST", `/s2s/v2.0/task/${kind}`, body);
+  const r = await api<TaskCreateResponse>(kind, "POST", `/s2s/v2.0/task/${kind}`, body);
   return r.data.task_id as string;
 }
 
 /** Poll with backoff + timeout. */
-export async function pollTask(kind: string, id: string, timeoutMs = 90_000) {
+export async function pollTask(kind: string, id: string, timeoutMs = 90_000): Promise<TaskData> {
   const t0 = Date.now();
   let wait = 1500;
   while (Date.now() - t0 < timeoutMs) {
-    const r = await api<any>(kind, "GET", `/s2s/v2.0/task/${kind}/${id}`);
+    const r = await api<TaskPollResponse>(kind, "GET", `/s2s/v2.0/task/${kind}/${id}`);
     const st = r.data?.task_status;
-    if (st === "success") return r.data;
+    if (st === "success") return r.data as TaskData;
     if (st === "error" || st === "failed")
       throw new Error(`${kind} task failed: ${r.data?.error_message || r.data?.error || "unknown"}`);
     await new Promise((s) => setTimeout(s, wait));
@@ -135,8 +166,7 @@ async function cached<T>(kind: string, inputHash: string, run: () => Promise<T>)
     mem.set(key, d);
     return d;
   }
-  if (process.env.DEMO_MODE === "1" && !hasYoucamKey())
-    throw new Error(`DEMO_MODE: no cached result for ${key}`);
+  if (process.env.DEMO_MODE === "1" && !hasYoucamKey()) throw new Error(`DEMO_MODE: no cached result for ${key}`);
   const v = await run();
   mem.set(key, v);
   cachePut(key, v);
@@ -159,7 +189,8 @@ export function skinAnalysis(img: Buffer) {
     });
     const d = await pollTask("skin-analysis", t);
     const out: SkinMetrics = {};
-    for (const o of d.results?.output ?? []) out[o.type] = o.ui_score;
+    const res = Array.isArray(d.results) ? undefined : d.results;
+    for (const o of res?.output ?? []) out[o.type] = o.ui_score;
     return out;
   });
 }
@@ -183,7 +214,8 @@ export function skinTone(img: Buffer) {
         const id = await uploadFile(img, "skin-tone-analysis");
         const t = await createTask("skin-tone-analysis", { src_file_id: id });
         const d = await pollTask("skin-tone-analysis", t);
-        return { ...(d.results.color as ToneResult), source: "youcam" as const };
+        const res = Array.isArray(d.results) ? undefined : d.results;
+        return { ...(res?.color as ToneResult), source: "youcam" as const };
       } catch {
         /* fall through to local estimate */
       }
@@ -201,7 +233,7 @@ export function clothesTryOn(person: Buffer, garment: Buffer, category: GarmentC
     const [s, g] = await Promise.all([uploadFile(person, "cloth-v4"), uploadFile(garment, "cloth-v4")]);
     const t = await createTask("cloth-v4", { src_file_id: s, ref_file_id: g, garment_category: category });
     const d = await pollTask("cloth-v4", t, 120_000);
-    return d.results?.url ?? d.results?.[0]?.download_url;
+    return resultUrl(d);
   });
 }
 
@@ -239,8 +271,16 @@ export function makeupTryOn(face: Buffer, plan: MakeupPlan) {
       ],
     });
     const d = await pollTask("makeup-vto", t, 120_000);
-    return d.results?.url ?? d.results?.[0]?.download_url;
+    return resultUrl(d);
   });
+}
+
+/** Result image URL: `results.url` or the first array entry's `download_url`. */
+function resultUrl(d: TaskData): string {
+  const r = d.results;
+  const url = Array.isArray(r) ? r[0]?.download_url : r?.url;
+  if (!url) throw new Error("YouCam task finished without a result URL");
+  return url;
 }
 
 /** Cache result images as bytes under a content key; returns data URL. */
@@ -248,8 +288,7 @@ async function cachedImage(kind: string, inputHash: string, run: () => Promise<s
   const key = `${kind}_${inputHash}.jpg`;
   const hit = cacheGetBin(key);
   if (hit) return "data:image/jpeg;base64," + hit.toString("base64");
-  if (process.env.DEMO_MODE === "1" && !hasYoucamKey())
-    throw new Error(`DEMO_MODE: no cached result for ${key}`);
+  if (process.env.DEMO_MODE === "1" && !hasYoucamKey()) throw new Error(`DEMO_MODE: no cached result for ${key}`);
   const url = await run();
   const r = await fetch(url);
   const b = Buffer.from(await r.arrayBuffer());

@@ -1,15 +1,30 @@
 import sharp from "sharp";
 
 export type RGB = [number, number, number];
-export interface Lab { L: number; a: number; b: number }
-export interface Hsl { h: number; s: number; l: number }
+export interface Lab {
+  L: number;
+  a: number;
+  b: number;
+}
+export interface Hsl {
+  h: number;
+  s: number;
+  l: number;
+}
 
 export const hexToRgb = (hex: string): RGB => {
   const h = hex.replace("#", "");
   return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
 };
 export const rgbToHex = ([r, g, b]: RGB) =>
-  "#" + [r, g, b].map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
+  "#" +
+  [r, g, b]
+    .map((v) =>
+      Math.max(0, Math.min(255, Math.round(v)))
+        .toString(16)
+        .padStart(2, "0")
+    )
+    .join("");
 
 export function rgbToLab([r, g, b]: RGB): Lab {
   const f = (c: number) => ((c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
@@ -22,10 +37,14 @@ export function rgbToLab([r, g, b]: RGB): Lab {
 }
 
 export function rgbToHsl([r, g, b]: RGB): Hsl {
-  r /= 255; g /= 255; b /= 255;
-  const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  const mx = Math.max(r, g, b),
+    mn = Math.min(r, g, b);
   const l = (mx + mn) / 2;
-  let h = 0, s = 0;
+  let h = 0,
+    s = 0;
   if (mx !== mn) {
     const d = mx - mn;
     s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
@@ -45,9 +64,15 @@ export function hslToRgb({ h, s, l }: Hsl): RGB {
 /** Dominant garment color: k-means on center-region pixels, ignoring near-white / near-black background. */
 export async function dominantColor(img: Buffer, k = 4): Promise<{ hex: string; rgb: RGB }> {
   const meta = await sharp(img).metadata();
-  const w = meta.width ?? 200, h = meta.height ?? 200;
+  const w = meta.width ?? 200,
+    h = meta.height ?? 200;
   const crop = await sharp(img)
-    .extract({ left: Math.floor(w * 0.25), top: Math.floor(h * 0.25), width: Math.floor(w * 0.5), height: Math.floor(h * 0.5) })
+    .extract({
+      left: Math.floor(w * 0.25),
+      top: Math.floor(h * 0.25),
+      width: Math.floor(w * 0.5),
+      height: Math.floor(h * 0.5),
+    })
     .resize(64, 64, { fit: "fill" })
     .removeAlpha()
     .raw()
@@ -55,7 +80,8 @@ export async function dominantColor(img: Buffer, k = 4): Promise<{ hex: string; 
   const px: RGB[] = [];
   for (let i = 0; i < crop.length; i += 3) {
     const p: RGB = [crop[i], crop[i + 1], crop[i + 2]];
-    const mx = Math.max(...p), mn = Math.min(...p);
+    const mx = Math.max(...p),
+      mn = Math.min(...p);
     if (mn > 235) continue; // near-white backdrop
     if (mx < 18) continue; // near-black
     px.push(p);
@@ -66,12 +92,19 @@ export async function dominantColor(img: Buffer, k = 4): Promise<{ hex: string; 
   for (let it = 0; it < 12; it++) {
     const sums = cent.map(() => [0, 0, 0, 0]);
     for (const p of px) {
-      let bi = 0, bd = Infinity;
+      let bi = 0,
+        bd = Infinity;
       cent.forEach((c, i) => {
         const d = (c[0] - p[0]) ** 2 + (c[1] - p[1]) ** 2 + (c[2] - p[2]) ** 2;
-        if (d < bd) { bd = d; bi = i; }
+        if (d < bd) {
+          bd = d;
+          bi = i;
+        }
       });
-      sums[bi][0] += p[0]; sums[bi][1] += p[1]; sums[bi][2] += p[2]; sums[bi][3]++;
+      sums[bi][0] += p[0];
+      sums[bi][1] += p[1];
+      sums[bi][2] += p[2];
+      sums[bi][3]++;
     }
     counts = sums.map((s) => s[3]);
     cent = sums.map((s, i) => (s[3] ? [s[0] / s[3], s[1] / s[3], s[2] / s[3]] : cent[i]));
@@ -87,7 +120,8 @@ export async function dominantColor(img: Buffer, k = 4): Promise<{ hex: string; 
  * so skin/background stay put on flat-lay product shots.
  */
 export async function recolorGarment(img: Buffer, fromHex: string, toHex: string): Promise<Buffer> {
-  const from = rgbToHsl(hexToRgb(fromHex)), to = rgbToHsl(hexToRgb(toHex));
+  const from = rgbToHsl(hexToRgb(fromHex)),
+    to = rgbToHsl(hexToRgb(toHex));
   const { data, info } = await sharp(img).removeAlpha().raw().toBuffer({ resolveWithObject: true });
   const out = Buffer.from(data);
   const sRatio = from.s > 0.05 ? to.s / from.s : 1;
@@ -100,7 +134,11 @@ export async function recolorGarment(img: Buffer, fromHex: string, toHex: string
     const nl = Math.max(0, Math.min(1, hsl.l + (to.l - from.l) * 0.6));
     const ns = Math.max(0, Math.min(1, hsl.s * (from.s > 0.05 ? sRatio : 1) + (from.s <= 0.05 ? to.s * 0.8 : 0)));
     const [r, g, b] = hslToRgb({ h: to.h, s: ns, l: nl });
-    out[i] = r; out[i + 1] = g; out[i + 2] = b;
+    out[i] = r;
+    out[i + 1] = g;
+    out[i + 2] = b;
   }
-  return sharp(out, { raw: { width: info.width, height: info.height, channels: 3 } }).jpeg({ quality: 90 }).toBuffer();
+  return sharp(out, { raw: { width: info.width, height: info.height, channels: 3 } })
+    .jpeg({ quality: 90 })
+    .toBuffer();
 }

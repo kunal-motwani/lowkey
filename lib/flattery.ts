@@ -63,7 +63,7 @@ export function scoreGarment(garmentHex: string, tone: ToneResult, metrics: Skin
   });
 
   // 2. Saturated reds/pinks/oranges echo redness.
-  const warmRed = (hueDist(g.h, 5) < 28 || hueDist(g.h, 345) < 20 || hueDist(g.h, 18) < 20) ? 1 : 0;
+  const warmRed = hueDist(g.h, 5) < 28 || hueDist(g.h, 345) < 20 || hueDist(g.h, 18) < 20 ? 1 : 0;
   add({
     rule: "redness-echo",
     metric: "Redness",
@@ -82,7 +82,7 @@ export function scoreGarment(garmentHex: string, tone: ToneResult, metrics: Skin
   });
 
   // 4. Undertone clash.
-  const icy = g.s < 0.5 && g.l > 0.7 && (g.h > 170 && g.h < 300);
+  const icy = g.s < 0.5 && g.l > 0.7 && g.h > 170 && g.h < 300;
   const earthy = g.h > 15 && g.h < 70 && g.l < 0.55;
   let clash = 0;
   if (under === "warm" && icy) clash = 1;
@@ -135,7 +135,7 @@ export function bestColorways(garmentHex: string, tone: ToneResult, metrics: Ski
 }
 
 /** Makeup that counters the specific problem. */
-export function rescueMakeup(f: Flattery, tone: ToneResult) {
+export function rescueMakeup(f: Flattery) {
   const warm = f.undertone === "warm";
   const top = f.reasons[0]?.rule;
   return {
@@ -147,7 +147,7 @@ export function rescueMakeup(f: Flattery, tone: ToneResult) {
       top === "sallow-reflection"
         ? "Peach corrector under the eyes cancels the blue-purple of dark circles so the shirt's cast reads less."
         : top === "redness-echo"
-        ? "A soft peach-nude blush keeps cheeks calm instead of stacking red on red."
-        : "A warm-berry lip and soft blush add the colour contrast the shirt takes away.",
+          ? "A soft peach-nude blush keeps cheeks calm instead of stacking red on red."
+          : "A warm-berry lip and soft blush add the colour contrast the shirt takes away.",
   };
 }

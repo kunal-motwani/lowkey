@@ -1,0 +1,31 @@
+name: Scoring feedback
+description: A Flattery score or reason looked wrong
+labels: ["scoring"]
+body:
+  - type: markdown
+    attributes:
+      value: Please do not upload photos of other people. Hex colours and numbers are enough.
+  - type: input
+    id: garment
+    attributes:
+      label: Garment colour (hex)
+      placeholder: "#7d8239"
+    validations:
+      required: true
+  - type: input
+    id: skin
+    attributes:
+      label: Skin colour (hex) and source
+      description: From YouCam or "local estimate"
+  - type: textarea
+    id: result
+    attributes:
+      label: Score and reasons shown
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected and why
+    validations:
+      required: true

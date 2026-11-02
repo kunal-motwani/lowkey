@@ -12,5 +12,8 @@ const tee = (c) => `<svg xmlns="http://www.w3.org/2000/svg" width="768" height="
 <path d="M270 110 Q384 200 498 110 Q384 160 270 110Z" fill="#000" fill-opacity=".25"/>
 </svg>`;
 const items = { "olive-tee": "#7d8239", "coral-top": "#f0705a", "navy-shirt": "#1f2f5c" };
-for (const [n, c] of Object.entries(items)) await sharp(Buffer.from(tee(c))).jpeg({ quality: 92 }).toFile(`${out}/${n}.jpg`);
+for (const [n, c] of Object.entries(items))
+  await sharp(Buffer.from(tee(c)))
+    .jpeg({ quality: 92 })
+    .toFile(`${out}/${n}.jpg`);
 console.log("ok");

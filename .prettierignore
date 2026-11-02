@@ -1,0 +1,10 @@
+node_modules
+.next
+coverage
+cache
+public
+package-lock.json
+*.md
+docs
+screenshots
+next-env.d.ts

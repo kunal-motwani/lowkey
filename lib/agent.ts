@@ -16,7 +16,13 @@ export interface Result {
   flattery: Flattery;
   verdict: "buy" | "fix";
   originalTryOn?: string;
-  better?: { hex: string; name: string; score: number; image?: string; alternatives: { hex: string; name: string; score: number }[] };
+  better?: {
+    hex: string;
+    name: string;
+    score: number;
+    image?: string;
+    alternatives: { hex: string; name: string; score: number }[];
+  };
   rescue?: { image?: string; plan: ReturnType<typeof rescueMakeup>; baselineScore: number };
   explanation: string;
   errors: string[];
@@ -27,8 +33,8 @@ type Emit = (e: AgentEvent) => void;
 async function safe<T>(errors: string[], label: string, fn: () => Promise<T>): Promise<T | undefined> {
   try {
     return await fn();
-  } catch (e: any) {
-    errors.push(`${label}: ${e.message}`);
+  } catch (e) {
+    errors.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
     return undefined;
   }
 }
@@ -39,7 +45,11 @@ export async function runStylist(selfie: Buffer, garment: Buffer, emit: Emit): P
   // 1. Perceive: two YouCam analyses in parallel
   emit({ step: "perceive", status: "running", api: "AI Skin Analysis + skin tone" });
   const [metrics, tone] = await Promise.all([skinAnalysis(selfie), skinTone(selfie)]);
-  emit({ step: "perceive", status: "done", detail: `Skin tone ${tone.skin_color} (${tone.source === "youcam" ? "YouCam Skin Tone API" : "local estimate"}); ${Object.keys(metrics).length} skin metrics` });
+  emit({
+    step: "perceive",
+    status: "done",
+    detail: `Skin tone ${tone.skin_color} (${tone.source === "youcam" ? "YouCam Skin Tone API" : "local estimate"}); ${Object.keys(metrics).length} skin metrics`,
+  });
 
   // 2. Garment color
   emit({ step: "garment", status: "running", detail: "k-means on centre pixels" });
@@ -53,7 +63,11 @@ export async function runStylist(selfie: Buffer, garment: Buffer, emit: Emit): P
 
   // 4. Decide
   const verdict = flattery.score >= 70 ? "buy" : "fix";
-  emit({ step: "decide", status: "done", detail: verdict === "buy" ? "Buy with confidence" : "Below 70 - planning fixes" });
+  emit({
+    step: "decide",
+    status: "done",
+    detail: verdict === "buy" ? "Buy with confidence" : "Below 70 - planning fixes",
+  });
 
   // Original try-on (needed in both branches for the side-by-side)
   const originalTryOn = await safe(errors, "Clothes try-on", () => clothesTryOn(selfie, garment));
@@ -62,17 +76,32 @@ export async function runStylist(selfie: Buffer, garment: Buffer, emit: Emit): P
 
   if (verdict === "fix") {
     // 4a. Recolor path
-    emit({ step: "recolor", status: "running", api: "AI Clothes Virtual Try-On", detail: "Re-colouring garment locally, ranking colourways" });
+    emit({
+      step: "recolor",
+      status: "running",
+      api: "AI Clothes Virtual Try-On",
+      detail: "Re-colouring garment locally, ranking colourways",
+    });
     const ways = bestColorways(hex, tone, metrics, 3);
     const top = ways[0];
     result.better = { hex: top.hex, name: top.name, score: top.score, alternatives: ways };
     const recolored = await safe(errors, "Recolor", () => recolorGarment(garment, hex, top.hex));
-    if (recolored) result.better.image = await safe(errors, "Clothes try-on (better colour)", () => clothesTryOn(selfie, recolored));
-    emit({ step: "recolor", status: result.better.image ? "done" : "error", detail: `Best: ${top.name} ${top.hex} scores ${top.score}` });
+    if (recolored)
+      result.better.image = await safe(errors, "Clothes try-on (better colour)", () => clothesTryOn(selfie, recolored));
+    emit({
+      step: "recolor",
+      status: result.better.image ? "done" : "error",
+      detail: `Best: ${top.name} ${top.hex} scores ${top.score}`,
+    });
 
     // 4b. Rescue path: makeup on top of the try-on (fall back to the selfie)
-    emit({ step: "rescue", status: "running", api: "AI Makeup Virtual Try-On", detail: "Lip + blush + concealer chosen against your top concern" });
-    const plan = rescueMakeup(flattery, tone);
+    emit({
+      step: "rescue",
+      status: "running",
+      api: "AI Makeup Virtual Try-On",
+      detail: "Lip + blush + concealer chosen against your top concern",
+    });
+    const plan = rescueMakeup(flattery);
     const base = originalTryOn ? Buffer.from(originalTryOn.split(",")[1], "base64") : selfie;
     const img = await safe(errors, "Makeup try-on", () => makeupTryOn(base, plan));
     result.rescue = { image: img, plan, baselineScore: flattery.score };
@@ -108,18 +137,20 @@ async function explain(r: Result): Promise<string> {
         messages: [
           {
             role: "user",
-            content: `Write a friendly 2-sentence verdict for a shopper. Do not invent numbers or claim precise optical effects; use words like "can" and "tends to". Data: ${JSON.stringify({
-              score: r.flattery.score,
-              verdict: r.verdict,
-              reasons: r.flattery.reasons.map((x) => x.text),
-              betterColour: r.better && { name: r.better.name, score: r.better.score },
-              makeupNote: r.rescue?.plan.note,
-            })}`,
+            content: `Write a friendly 2-sentence verdict for a shopper. Do not invent numbers or claim precise optical effects; use words like "can" and "tends to". Data: ${JSON.stringify(
+              {
+                score: r.flattery.score,
+                verdict: r.verdict,
+                reasons: r.flattery.reasons.map((x) => x.text),
+                betterColour: r.better && { name: r.better.name, score: r.better.score },
+                makeupNote: r.rescue?.plan.note,
+              }
+            )}`,
           },
         ],
       }),
     });
-    const j: any = await res.json();
+    const j = (await res.json()) as { content?: { text?: string }[] };
     return j.content?.[0]?.text?.trim() || templated(r);
   } catch {
     return templated(r);

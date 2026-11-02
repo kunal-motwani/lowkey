@@ -1,0 +1,38 @@
+name: Bug report
+description: Something is broken or gives a wrong result
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Live YouCam API
+        - DEMO_MODE with cache
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Node version, browser
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error text
+      description: Do not paste API keys or personal photos.
+      render: shell

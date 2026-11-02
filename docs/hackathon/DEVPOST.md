@@ -1,3 +1,5 @@
+> **Historical.** Written for the hackathon submission; the product has moved on. See the main [README](../../README.md) for current, accurate behaviour.
+
 ## Inspiration
 We kept buying tops that looked amazing on the model and made us look exhausted. Garment colour reflects onto the face and amplifies whatever our skin is doing that day. Personal-colour apps give one static palette; try-on tools show fit but not whether the colour flatters *us, today*. Nobody connects live skin condition, skin tone and the specific garment before checkout.
 

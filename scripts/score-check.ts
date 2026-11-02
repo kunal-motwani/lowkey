@@ -55,5 +55,6 @@ expect(a.olive < a.coral && a.olive < a.navy, "olive scores lowest when dark cir
 expect(b.coral < b.olive && b.coral < b.navy, "coral scores lowest when redness is high");
 expect(c.navy > c.olive && c.navy > c.coral, "navy beats olive and coral when both concerns are high");
 expect(lo.navy >= 75, "navy reasonably high (>=75) on low-concern skin");
-for (const p of Object.values(results)) for (const s of Object.values(p)) expect(s >= 0 && s <= 100, `score ${s} within 0-100`);
+for (const p of Object.values(results))
+  for (const s of Object.values(p)) expect(s >= 0 && s <= 100, `score ${s} within 0-100`);
 process.exit(fail ? 1 : 0);

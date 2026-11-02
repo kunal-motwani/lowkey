@@ -1,3 +1,5 @@
+> **Historical.** Written for the hackathon submission; the product has moved on. See the main [README](../../README.md) for current, accurate behaviour.
+
 # Flattr: 2-minute demo voiceover
 
 **[0:00–0:15] Problem**
