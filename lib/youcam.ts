@@ -1,0 +1,237 @@
+import crypto from "crypto";
+import fs from "fs";
+import path from "path";
+
+/**
+ * Typed YouCam API client: upload -> create task -> poll, with a disk cache
+ * keyed by the hash of the inputs so repeated runs cost zero API units.
+ * Endpoint shapes are taken from https://docs.perfectcorp.com (v2.0 s2s API).
+ */
+
+const BASE = process.env.YOUCAM_API_BASE || "https://yce-api-01.makeupar.com";
+const CACHE_DIR = path.join(process.cwd(), "cache");
+
+export const sha = (b: Buffer | string) =>
+  crypto.createHash("sha1").update(b).digest("hex").slice(0, 16);
+
+export function cacheGet<T>(key: string): T | null {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(CACHE_DIR, key + ".json"), "utf8")) as T;
+  } catch {
+    return null;
+  }
+}
+export function cachePut(key: string, val: unknown) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(CACHE_DIR, key + ".json"), JSON.stringify(val));
+  } catch {
+    /* read-only FS (Vercel) - in-memory only */
+  }
+}
+export function cacheGetBin(key: string): Buffer | null {
+  try {
+    return fs.readFileSync(path.join(CACHE_DIR, key));
+  } catch {
+    return null;
+  }
+}
+export function cachePutBin(key: string, b: Buffer) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(path.join(CACHE_DIR, key), b);
+  } catch {
+    /* ignore */
+  }
+}
+
+const mem = new Map<string, unknown>();
+
+function headers() {
+  const k = process.env.YOUCAM_API_KEY;
+  if (!k) throw new Error("YOUCAM_API_KEY missing");
+  return { Authorization: `Bearer ${k}`, "Content-Type": "application/json" };
+}
+
+async function api<T>(method: string, p: string, body?: unknown): Promise<T> {
+  const res = await fetch(BASE + p, {
+    method,
+    headers: headers(),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let json: any;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(`YouCam ${p} -> ${res.status} ${text.slice(0, 200)}`);
+  }
+  if (!res.ok || (json.status && json.status !== 200)) {
+    throw new Error(`YouCam ${p} -> ${res.status} ${json.error || json.error_code || text.slice(0, 200)}`);
+  }
+  return json as T;
+}
+
+/** Step 1+2: initialise upload, PUT bytes to the pre-signed URL. Returns file_id. */
+export async function uploadFile(buf: Buffer, contentType = "image/jpeg", name = "image.jpg") {
+  const key = "file_" + sha(buf);
+  const hit = mem.get(key) as string | undefined;
+  if (hit) return hit;
+  const init = await api<any>("POST", "/s2s/v2.0/file", {
+    files: [{ content_type: contentType, file_name: name, file_size: buf.length }],
+  });
+  const f = init.data.files[0];
+  const req = f.requests[0];
+  const put = await fetch(req.url, {
+    method: req.method || "PUT",
+    headers: { ...(req.headers || {}), "Content-Type": contentType },
+    body: new Uint8Array(buf),
+  });
+  if (!put.ok) throw new Error(`Upload PUT failed ${put.status}`);
+  mem.set(key, f.file_id);
+  return f.file_id as string;
+}
+
+export async function createTask(kind: string, body: Record<string, unknown>) {
+  const r = await api<any>("POST", `/s2s/v2.0/task/${kind}`, body);
+  return r.data.task_id as string;
+}
+
+/** Poll with backoff + timeout. */
+export async function pollTask(kind: string, id: string, timeoutMs = 90_000) {
+  const t0 = Date.now();
+  let wait = 1500;
+  while (Date.now() - t0 < timeoutMs) {
+    const r = await api<any>("GET", `/s2s/v2.0/task/${kind}/${id}`);
+    const st = r.data?.task_status;
+    if (st === "success") return r.data;
+    if (st === "error" || st === "failed")
+      throw new Error(`${kind} task failed: ${r.data?.error_message || r.data?.error || "unknown"}`);
+    await new Promise((s) => setTimeout(s, wait));
+    wait = Math.min(wait * 1.3, 5000);
+  }
+  throw new Error(`${kind} task timed out`);
+}
+
+/** Cached run: key = kind + input hash. */
+async function cached<T>(kind: string, inputHash: string, run: () => Promise<T>): Promise<T> {
+  const key = `${kind}_${inputHash}`;
+  const m = mem.get(key) as T | undefined;
+  if (m) return m;
+  const d = cacheGet<T>(key);
+  if (d) {
+    mem.set(key, d);
+    return d;
+  }
+  if (process.env.DEMO_MODE === "1" && !process.env.YOUCAM_API_KEY)
+    throw new Error(`DEMO_MODE: no cached result for ${key}`);
+  const v = await run();
+  mem.set(key, v);
+  cachePut(key, v);
+  return v;
+}
+
+export type SkinMetrics = Record<string, number>; // ui_score 1-100; ASSUMED higher = healthier (matches concernSeverity in flattery.ts). UNVERIFIED until a real API response is checked.
+
+export const SKIN_ACTIONS = ["dark_circle_v2", "redness", "oiliness", "texture", "age_spot", "moisture", "radiance"];
+
+/** AI Skin Analysis. ui_score is 1-100 where higher = healthier for most categories. */
+export function skinAnalysis(img: Buffer) {
+  return cached<SkinMetrics>("skin", sha(img), async () => {
+    const id = await uploadFile(img);
+    const t = await createTask("skin-analysis", {
+      src_file_id: id,
+      dst_actions: SKIN_ACTIONS,
+      miniserver_args: { enable_mask_overlay: false },
+      format: "json",
+    });
+    const d = await pollTask("skin-analysis", t);
+    const out: SkinMetrics = {};
+    for (const o of d.results?.output ?? []) out[o.type] = o.ui_score;
+    return out;
+  });
+}
+
+export interface ToneResult {
+  skin_color: string;
+  eye_color?: string;
+  lip_color?: string;
+  hair_color?: string;
+  eye_color_name?: string;
+  hair_color_name?: string;
+}
+
+/** AI Skin Tone Analysis (Facial Color Tones). */
+export function skinTone(img: Buffer) {
+  return cached<ToneResult>("tone", sha(img), async () => {
+    const id = await uploadFile(img);
+    const t = await createTask("skin-tone-analysis", { src_file_id: id });
+    const d = await pollTask("skin-tone-analysis", t);
+    return d.results.color as ToneResult;
+  });
+}
+
+export type GarmentCategory = "upper_body" | "lower_body" | "full_body" | "shoes";
+
+/** AI Clothes Virtual Try-On. Returns result image bytes (cached) since result URLs expire. */
+export function clothesTryOn(person: Buffer, garment: Buffer, category: GarmentCategory = "upper_body") {
+  const h = sha(person) + "_" + sha(garment) + "_" + category;
+  return cachedImage("vto", h, async () => {
+    const [s, g] = await Promise.all([uploadFile(person), uploadFile(garment)]);
+    const t = await createTask("cloth-v4", { src_file_id: s, ref_file_id: g, garment_category: category });
+    const d = await pollTask("cloth-v4", t, 120_000);
+    return d.results?.url ?? d.results?.[0]?.download_url;
+  });
+}
+
+export interface MakeupPlan {
+  lip: string;
+  blush: string;
+  concealer: string;
+}
+
+/** AI Makeup Virtual Try-On: lip + blush + concealer on an image. */
+export function makeupTryOn(face: Buffer, plan: MakeupPlan) {
+  const h = sha(face) + "_" + sha(JSON.stringify(plan));
+  return cachedImage("makeup", h, async () => {
+    // makeup-vto takes src_file_url; a File-API upload is accepted via file id too in v2.0
+    const id = await uploadFile(face);
+    const t = await createTask("makeup-vto", {
+      src_file_id: id,
+      version: "1.0",
+      effects: [
+        {
+          category: "lip_color",
+          shape: { name: "original" },
+          style: { type: "full" },
+          palettes: [{ color: plan.lip, texture: "matte", colorIntensity: 55 }],
+        },
+        {
+          category: "blush",
+          pattern: { name: "1colors1" },
+          palettes: [{ color: plan.blush, texture: "matte", colorIntensity: 45 }],
+        },
+        {
+          category: "concealer",
+          palettes: [{ color: plan.concealer, colorIntensity: 60, colorUnderEyeIntensity: 70, coverageLevel: 60 }],
+        },
+      ],
+    });
+    const d = await pollTask("makeup-vto", t, 120_000);
+    return d.results?.url ?? d.results?.[0]?.download_url;
+  });
+}
+
+/** Cache result images as bytes under a content key; returns data URL. */
+async function cachedImage(kind: string, inputHash: string, run: () => Promise<string>): Promise<string> {
+  const key = `${kind}_${inputHash}.jpg`;
+  const hit = cacheGetBin(key);
+  if (hit) return "data:image/jpeg;base64," + hit.toString("base64");
+  if (process.env.DEMO_MODE === "1" && !process.env.YOUCAM_API_KEY)
+    throw new Error(`DEMO_MODE: no cached result for ${key}`);
+  const url = await run();
+  const r = await fetch(url);
+  const b = Buffer.from(await r.arrayBuffer());
+  cachePutBin(key, b);
+  return "data:image/jpeg;base64," + b.toString("base64");
+}
