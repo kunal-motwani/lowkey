@@ -37,9 +37,9 @@ export async function runStylist(selfie: Buffer, garment: Buffer, emit: Emit): P
   const errors: string[] = [];
 
   // 1. Perceive: two YouCam analyses in parallel
-  emit({ step: "perceive", status: "running", api: "AI Skin Analysis + AI Skin Tone Analysis" });
+  emit({ step: "perceive", status: "running", api: "AI Skin Analysis + skin tone" });
   const [metrics, tone] = await Promise.all([skinAnalysis(selfie), skinTone(selfie)]);
-  emit({ step: "perceive", status: "done", detail: `Skin tone ${tone.skin_color}; ${Object.keys(metrics).length} skin metrics` });
+  emit({ step: "perceive", status: "done", detail: `Skin tone ${tone.skin_color} (${tone.source === "youcam" ? "YouCam Skin Tone API" : "local estimate"}); ${Object.keys(metrics).length} skin metrics` });
 
   // 2. Garment color
   emit({ step: "garment", status: "running", detail: "k-means on centre pixels" });

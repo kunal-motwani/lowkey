@@ -56,7 +56,8 @@ npm run dev              # http://localhost:3000
 
 | Variable | Purpose |
 |---|---|
-| `YOUCAM_API_KEY` | YouCam API Bearer token (never commit) |
+| `YOUCAM_API_KEY` | YouCam API Bearer token used for every API (never commit) |
+| `YOUCAM_KEY_SKIN` / `_TONE` / `_CLOTHES` / `_MAKEUP` | Optional per-API keys; each overrides `YOUCAM_API_KEY` for that API |
 | `YOUCAM_API_BASE` | API host; set your India-region host if your console shows one |
 | `DEMO_MODE=1` | Serve committed cached results for the samples without a key |
 | `ANTHROPIC_API_KEY` | Optional; LLM-written verdict. App works without it |

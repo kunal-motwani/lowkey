@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { localSkinTone } from "./tone-local";
 
 /**
  * Typed YouCam API client: upload -> create task -> poll, with a disk cache
@@ -47,16 +48,27 @@ export function cachePutBin(key: string, b: Buffer) {
 
 const mem = new Map<string, unknown>();
 
-function headers() {
-  const k = process.env.YOUCAM_API_KEY;
-  if (!k) throw new Error("YOUCAM_API_KEY missing");
+/** Per-API keys (YOUCAM_KEY_SKIN etc.) with a single YOUCAM_API_KEY as fallback. */
+const KEY_ENV: Record<string, string> = {
+  "skin-analysis": "YOUCAM_KEY_SKIN",
+  "skin-tone-analysis": "YOUCAM_KEY_TONE",
+  "cloth-v4": "YOUCAM_KEY_CLOTHES",
+  "makeup-vto": "YOUCAM_KEY_MAKEUP",
+};
+export const hasYoucamKey = () =>
+  !!process.env.YOUCAM_API_KEY || Object.values(KEY_ENV).some((e) => !!process.env[e]);
+
+function headers(kind: string) {
+  const name = KEY_ENV[kind];
+  const k = (name && process.env[name]) || process.env.YOUCAM_API_KEY;
+  if (!k) throw new Error(`${name ?? "YOUCAM_API_KEY"} missing`);
   return { Authorization: `Bearer ${k}`, "Content-Type": "application/json" };
 }
 
-async function api<T>(method: string, p: string, body?: unknown): Promise<T> {
+async function api<T>(kind: string, method: string, p: string, body?: unknown): Promise<T> {
   const res = await fetch(BASE + p, {
     method,
-    headers: headers(),
+    headers: headers(kind),
     body: body ? JSON.stringify(body) : undefined,
   });
   const text = await res.text();
@@ -73,11 +85,11 @@ async function api<T>(method: string, p: string, body?: unknown): Promise<T> {
 }
 
 /** Step 1+2: initialise upload, PUT bytes to the pre-signed URL. Returns file_id. */
-export async function uploadFile(buf: Buffer, contentType = "image/jpeg", name = "image.jpg") {
-  const key = "file_" + sha(buf);
+export async function uploadFile(buf: Buffer, kind: string, contentType = "image/jpeg", name = "image.jpg") {
+  const key = `file_${kind}_` + sha(buf);
   const hit = mem.get(key) as string | undefined;
   if (hit) return hit;
-  const init = await api<any>("POST", "/s2s/v2.0/file", {
+  const init = await api<any>(kind, "POST", "/s2s/v2.0/file", {
     files: [{ content_type: contentType, file_name: name, file_size: buf.length }],
   });
   const f = init.data.files[0];
@@ -93,7 +105,7 @@ export async function uploadFile(buf: Buffer, contentType = "image/jpeg", name =
 }
 
 export async function createTask(kind: string, body: Record<string, unknown>) {
-  const r = await api<any>("POST", `/s2s/v2.0/task/${kind}`, body);
+  const r = await api<any>(kind, "POST", `/s2s/v2.0/task/${kind}`, body);
   return r.data.task_id as string;
 }
 
@@ -102,7 +114,7 @@ export async function pollTask(kind: string, id: string, timeoutMs = 90_000) {
   const t0 = Date.now();
   let wait = 1500;
   while (Date.now() - t0 < timeoutMs) {
-    const r = await api<any>("GET", `/s2s/v2.0/task/${kind}/${id}`);
+    const r = await api<any>(kind, "GET", `/s2s/v2.0/task/${kind}/${id}`);
     const st = r.data?.task_status;
     if (st === "success") return r.data;
     if (st === "error" || st === "failed")
@@ -123,7 +135,7 @@ async function cached<T>(kind: string, inputHash: string, run: () => Promise<T>)
     mem.set(key, d);
     return d;
   }
-  if (process.env.DEMO_MODE === "1" && !process.env.YOUCAM_API_KEY)
+  if (process.env.DEMO_MODE === "1" && !hasYoucamKey())
     throw new Error(`DEMO_MODE: no cached result for ${key}`);
   const v = await run();
   mem.set(key, v);
@@ -138,7 +150,7 @@ export const SKIN_ACTIONS = ["dark_circle_v2", "redness", "oiliness", "texture",
 /** AI Skin Analysis. ui_score is 1-100 where higher = healthier for most categories. */
 export function skinAnalysis(img: Buffer) {
   return cached<SkinMetrics>("skin", sha(img), async () => {
-    const id = await uploadFile(img);
+    const id = await uploadFile(img, "skin-analysis");
     const t = await createTask("skin-analysis", {
       src_file_id: id,
       dst_actions: SKIN_ACTIONS,
@@ -154,6 +166,7 @@ export function skinAnalysis(img: Buffer) {
 
 export interface ToneResult {
   skin_color: string;
+  source?: "youcam" | "local";
   eye_color?: string;
   lip_color?: string;
   hair_color?: string;
@@ -161,13 +174,21 @@ export interface ToneResult {
   hair_color_name?: string;
 }
 
-/** AI Skin Tone Analysis (Facial Color Tones). */
+/** AI Skin Tone Analysis (Facial Color Tones). Falls back to a local estimate if no key / the call fails. */
 export function skinTone(img: Buffer) {
   return cached<ToneResult>("tone", sha(img), async () => {
-    const id = await uploadFile(img);
-    const t = await createTask("skin-tone-analysis", { src_file_id: id });
-    const d = await pollTask("skin-tone-analysis", t);
-    return d.results.color as ToneResult;
+    const toneKey = process.env.YOUCAM_KEY_TONE || process.env.YOUCAM_API_KEY;
+    if (toneKey) {
+      try {
+        const id = await uploadFile(img, "skin-tone-analysis");
+        const t = await createTask("skin-tone-analysis", { src_file_id: id });
+        const d = await pollTask("skin-tone-analysis", t);
+        return { ...(d.results.color as ToneResult), source: "youcam" as const };
+      } catch {
+        /* fall through to local estimate */
+      }
+    }
+    return { ...(await localSkinTone(img)), source: "local" as const };
   });
 }
 
@@ -177,7 +198,7 @@ export type GarmentCategory = "upper_body" | "lower_body" | "full_body" | "shoes
 export function clothesTryOn(person: Buffer, garment: Buffer, category: GarmentCategory = "upper_body") {
   const h = sha(person) + "_" + sha(garment) + "_" + category;
   return cachedImage("vto", h, async () => {
-    const [s, g] = await Promise.all([uploadFile(person), uploadFile(garment)]);
+    const [s, g] = await Promise.all([uploadFile(person, "cloth-v4"), uploadFile(garment, "cloth-v4")]);
     const t = await createTask("cloth-v4", { src_file_id: s, ref_file_id: g, garment_category: category });
     const d = await pollTask("cloth-v4", t, 120_000);
     return d.results?.url ?? d.results?.[0]?.download_url;
@@ -195,7 +216,7 @@ export function makeupTryOn(face: Buffer, plan: MakeupPlan) {
   const h = sha(face) + "_" + sha(JSON.stringify(plan));
   return cachedImage("makeup", h, async () => {
     // makeup-vto takes src_file_url; a File-API upload is accepted via file id too in v2.0
-    const id = await uploadFile(face);
+    const id = await uploadFile(face, "makeup-vto");
     const t = await createTask("makeup-vto", {
       src_file_id: id,
       version: "1.0",
@@ -227,7 +248,7 @@ async function cachedImage(kind: string, inputHash: string, run: () => Promise<s
   const key = `${kind}_${inputHash}.jpg`;
   const hit = cacheGetBin(key);
   if (hit) return "data:image/jpeg;base64," + hit.toString("base64");
-  if (process.env.DEMO_MODE === "1" && !process.env.YOUCAM_API_KEY)
+  if (process.env.DEMO_MODE === "1" && !hasYoucamKey())
     throw new Error(`DEMO_MODE: no cached result for ${key}`);
   const url = await run();
   const r = await fetch(url);
