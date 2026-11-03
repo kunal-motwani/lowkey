@@ -9,6 +9,12 @@ People buy clothes online that look great on the model, then look washed out in 
 
 > Flattr is a styling aid, **not a medical device**. See [Disclaimer](#disclaimer-and-limitations).
 
+## Features
+
+- **Camera capture:** open your camera in the browser (permission prompt, face guide, lighting check, timer), or upload a photo. Camera access needs HTTPS or localhost.
+- **Skin-aware score** with plain-English reasons, a better colour on you, and a makeup rescue look.
+- **Live agent timeline** showing each step and the YouCam API behind it.
+
 ## How it works
 
 ```mermaid

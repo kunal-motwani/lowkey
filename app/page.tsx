@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { AgentEvent, Result } from "@/lib/agent";
+import CameraCapture from "@/components/CameraCapture";
 
 type Step = AgentEvent;
 type View = "landing" | "input" | "running" | "result";
@@ -73,6 +74,7 @@ export default function Home() {
   const [steps, setSteps] = useState<Record<string, Step>>({});
   const [result, setResult] = useState<Result | null>(null);
   const [error, setError] = useState("");
+  const [cameraOpen, setCameraOpen] = useState(false);
   const headingRef = useRef<HTMLHeadingElement>(null);
 
   const selfieObj = useObjectUrl(selfie);
@@ -80,20 +82,22 @@ export default function Home() {
   const selfiePrev = selfieObj ?? (useSampleSelfie ? "/samples/selfie.jpg" : null);
   const garmentPrev = garmentObj ?? (sample ? `/samples/${sample}` : null);
 
-  const ready = Boolean((selfie || useSampleSelfie) && (garment || garmentUrl.trim() || sample));
+  const hasGarment = Boolean(garment || garmentUrl.trim() || sample);
+  const ready = Boolean((selfie || useSampleSelfie) && hasGarment);
 
   // Move focus to the new view's heading for keyboard / screen-reader users.
   useEffect(() => {
     if (view !== "landing") headingRef.current?.focus();
   }, [view]);
 
-  async function run() {
+  async function run(selfieOverride?: File) {
+    const selfieFile = selfieOverride ?? selfie;
     setView("running");
     setSteps({});
     setError("");
     setResult(null);
     const fd = new FormData();
-    if (selfie) fd.append("selfie", selfie);
+    if (selfieFile) fd.append("selfie", selfieFile);
     else fd.append("sampleSelfie", "selfie.jpg");
     if (garment) fd.append("garment", garment);
     else if (garmentUrl.trim()) fd.append("garmentUrl", garmentUrl.trim());
@@ -194,6 +198,20 @@ export default function Home() {
         </section>
       )}
 
+      {cameraOpen && (
+        <CameraCapture
+          acceptLabel={hasGarment ? "Use photo & analyse" : "Use this photo"}
+          onClose={() => setCameraOpen(false)}
+          onCapture={(file) => {
+            setSelfie(file);
+            setUseSampleSelfie(false);
+            setCameraOpen(false);
+            // Garment already chosen: go straight to the analysis.
+            if (hasGarment) void run(file);
+          }}
+        />
+      )}
+
       {view === "input" && (
         <section className="space-y-5 pt-2" aria-labelledby="input-h">
           <h1 id="input-h" ref={headingRef} tabIndex={-1} className="text-2xl font-extrabold outline-none">
@@ -219,13 +237,15 @@ export default function Home() {
             <div className="flex items-center gap-4">
               <SafeImg src={selfiePrev ?? undefined} alt="Your selfie preview" className="thumb h-24 w-24 shrink-0" />
               <div className="flex flex-col gap-2">
+                <button type="button" className="btn-primary" onClick={() => setCameraOpen(true)}>
+                  Open camera
+                </button>
                 <label className="btn">
-                  Upload or take photo
+                  Upload a photo
                   <input
                     className="sr-only"
                     type="file"
                     accept="image/*"
-                    capture="user"
                     aria-label="Upload or take a selfie"
                     onChange={(e) => {
                       setSelfie(e.target.files?.[0] ?? null);
@@ -307,7 +327,7 @@ export default function Home() {
             )}
           </div>
 
-          <button type="button" disabled={!ready} onClick={run} className="btn-primary w-full">
+          <button type="button" disabled={!ready} onClick={() => run()} className="btn-primary w-full">
             Will this flatter me?
           </button>
           {!ready && <p className="muted text-center text-xs">Add a selfie and a garment to continue.</p>}
