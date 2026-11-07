@@ -54,6 +54,18 @@ export const BODY_FACING_FAIL = 0.3;
 export const BODY_TILT_WARN_DEG = 12;
 export const BODY_LEAN_WARN_DEG = 15;
 
+/** Face photo: space below the chin (fraction of the face-box height) needed to show the neck for necklaces. */
+export const NECK_MIN_BELOW_CHIN_RATIO = 0.25;
+
+/** Hand photo (bracelet / ring try-on). The hand box is the bounding box of the 21 landmarks. */
+export const HAND_MIN_SIZE_RATIO = 0.35; // hand box width OR height as a fraction of the image; below = FAIL
+export const HAND_EDGE_WARN = 0.02; // a landmark closer than this to the edge = touching, WARN
+export const HAND_WRIST_EDGE_WARN = 0.05; // wrist this close to an edge = WARN (needs room for a bracelet)
+/** Mean gap between adjacent fingertips (index..pinky) / palm width. Fingers pressed together is about 0.33. */
+export const HAND_SPREAD_MIN = 0.4;
+/** Handedness confidence below this is treated as unknown when judging back-of-hand vs palm. */
+export const HAND_HANDEDNESS_MIN_SCORE = 0.6;
+
 /* ---------- Types ---------- */
 
 /** Pixel-space face box. */
@@ -72,6 +84,17 @@ export interface PoseLandmark {
   y: number;
   visibility?: number;
   presence?: number;
+}
+
+/** One detected hand: 21 normalised landmarks (MediaPipe layout) plus the model's handedness label, if any. */
+export interface HandObservation {
+  landmarks: PoseLandmark[];
+  /** MediaPipe label. It assumes a MIRRORED (selfie) image; our photos are not mirrored, so it is flipped on use. */
+  handedness?: "Left" | "Right";
+  score?: number;
+}
+export interface HandDetection {
+  hands: HandObservation[];
 }
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
@@ -162,6 +185,20 @@ export function evaluateFace(detection: FaceDetection | FaceBox[], imgW: number,
   } else {
     out.push(chk("face-edge", "Whole face in frame", "pass", "Your whole face is inside the frame."));
   }
+
+  // Neck / shoulders: the space under the chin must be at least ~25% of the face height (WARN only).
+  const below = (imgH - (f.y + f.h)) / Math.max(f.h, 1e-6);
+  out.push(
+    below >= NECK_MIN_BELOW_CHIN_RATIO
+      ? chk("neck-visible", "Neck and shoulders", "pass", "There is room below your chin to show your neck.")
+      : chk(
+          "neck-visible",
+          "Neck and shoulders",
+          "warn",
+          "Your neck and shoulders look cropped.",
+          "Include your neck and shoulders so necklaces can be shown"
+        )
+  );
   return out;
 }
 
@@ -306,6 +343,164 @@ export function evaluateBody(landmarks: PoseLandmark[] | PoseLandmark[][], imgW:
     } else {
       out.push(chk("body-upright", "Standing upright", "pass", "You are standing upright."));
     }
+  }
+  return out;
+}
+
+/* Hand landmarks: 0 wrist, 5 index mcp, 17 pinky mcp, tips 4/8/12/16/20, pips 6/10/14/18. */
+const H = {
+  wrist: 0,
+  indexMcp: 5,
+  pinkyMcp: 17,
+  tips: [4, 8, 12, 16, 20],
+  fingerTips: [8, 12, 16, 20],
+  pips: [6, 10, 14, 18],
+};
+const HAND_TIP = "Place your hand flat, back of the hand towards the camera, fingers slightly apart, wrist in view";
+
+function handBoxSize(h: HandObservation) {
+  const xs = h.landmarks.map((p) => p.x);
+  const ys = h.landmarks.map((p) => p.y);
+  return Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+}
+
+/**
+ * Is the back of the hand towards the camera? true / false, or null when it cannot be told.
+ * Image y points down. For a RIGHT hand seen from the palm side, (wrist->index_mcp) x (wrist->pinky_mcp)
+ * is negative and for the back it is positive (signs swap for a left hand). MediaPipe's handedness
+ * assumes a mirrored image and our photos are not mirrored, so the label is flipped.
+ */
+export function backOfHandFacing(h: HandObservation, imgW: number, imgH: number): boolean | null {
+  const lm = h.landmarks;
+  if (lm.length < 21 || !h.handedness || (h.score ?? 1) < HAND_HANDEDNESS_MIN_SCORE) return null;
+  const w = lm[H.wrist];
+  const ax = (lm[H.indexMcp].x - w.x) * imgW;
+  const ay = (lm[H.indexMcp].y - w.y) * imgH;
+  const bx = (lm[H.pinkyMcp].x - w.x) * imgW;
+  const by = (lm[H.pinkyMcp].y - w.y) * imgH;
+  const cross = ax * by - ay * bx;
+  if (Math.abs(cross) < 1e-6) return null;
+  const actualRight = h.handedness === "Left"; // flipped: the image is not mirrored
+  return actualRight ? cross > 0 : cross < 0;
+}
+
+export function evaluateHand(detection: HandDetection | HandObservation[], imgW: number, imgH: number): QualityCheck[] {
+  const hands = (Array.isArray(detection) ? detection : detection.hands).filter((h) => h.landmarks.length >= 21);
+  if (hands.length === 0) {
+    return [chk("hand-found", "Hand", "fail", "No hand found in the photo.", `${HAND_TIP}. Use good light.`)];
+  }
+  const out: QualityCheck[] = [];
+  if (hands.length > 1) {
+    out.push(chk("hand-count", "One hand", "fail", `${hands.length} hands found.`, "Show only one hand in the photo."));
+  } else {
+    out.push(chk("hand-count", "One hand", "pass", "One hand found."));
+  }
+  const hand = [...hands].sort((a, b) => handBoxSize(b) - handBoxSize(a))[0];
+  const lm = hand.landmarks;
+
+  // All five fingertips must be inside the frame.
+  const tipsOut = H.tips.filter((i) => !inFrame(lm[i])).length;
+  const outside = lm.filter((p) => !inFrame(p)).length;
+  const margin = Math.min(...lm.flatMap((p) => [p.x, 1 - p.x, p.y, 1 - p.y]));
+  if (tipsOut > 0 || outside > 2) {
+    out.push(
+      chk(
+        "hand-fingers",
+        "All fingers in frame",
+        "fail",
+        tipsOut > 0 ? "Some fingertips are cut off." : "Part of your hand is cut off.",
+        "Move your hand back a little so all five fingers are inside the frame."
+      )
+    );
+  } else if (margin < HAND_EDGE_WARN) {
+    out.push(
+      chk(
+        "hand-fingers",
+        "All fingers in frame",
+        "warn",
+        "Your hand is touching the edge of the photo.",
+        "Leave a little space around your fingers."
+      )
+    );
+  } else {
+    out.push(chk("hand-fingers", "All fingers in frame", "pass", "All five fingers are inside the frame."));
+  }
+
+  const size = handBoxSize(hand);
+  out.push(
+    size >= HAND_MIN_SIZE_RATIO
+      ? chk("hand-size", "Hand size", "pass", `Your hand fills about ${pct(size)} of the photo.`)
+      : chk(
+          "hand-size",
+          "Hand size",
+          "fail",
+          `Your hand fills only about ${pct(size)} of the photo; it needs to be at least ${pct(HAND_MIN_SIZE_RATIO)}.`,
+          "Move closer so your hand fills more of the frame."
+        )
+  );
+
+  const wr = lm[H.wrist];
+  if (!inFrame(wr)) {
+    out.push(
+      chk(
+        "hand-wrist",
+        "Wrist visible",
+        "fail",
+        "Your wrist is outside the frame.",
+        "Show your wrist, with a little forearm, so a bracelet can be placed."
+      )
+    );
+  } else if (Math.min(wr.x, 1 - wr.x, wr.y, 1 - wr.y) < HAND_WRIST_EDGE_WARN) {
+    out.push(
+      chk(
+        "hand-wrist",
+        "Wrist visible",
+        "warn",
+        "Your wrist is right at the edge of the photo.",
+        "Leave room below your hand so your wrist is clearly in view."
+      )
+    );
+  } else {
+    out.push(chk("hand-wrist", "Wrist visible", "pass", "Your wrist is in view."));
+  }
+
+  // Back of the hand: a heuristic, so uncertainty or a palm reading is only ever a warning.
+  const back = backOfHandFacing(hand, imgW, imgH);
+  if (back === true) {
+    out.push(chk("hand-back", "Back of hand", "pass", "The back of your hand faces the camera."));
+  } else if (back === false) {
+    out.push(chk("hand-back", "Back of hand", "warn", "This looks like the palm side of your hand.", HAND_TIP));
+  } else {
+    out.push(
+      chk(
+        "hand-back",
+        "Back of hand",
+        "warn",
+        "We couldn't tell which side of your hand faces the camera.",
+        "Make sure the back of your hand faces the camera."
+      )
+    );
+  }
+
+  // Fingers flat and slightly apart (heuristic warning).
+  const d = (a: number, b: number) => Math.hypot((lm[a].x - lm[b].x) * imgW, (lm[a].y - lm[b].y) * imgH);
+  const curled = H.fingerTips.some((tip, k) => d(H.wrist, tip) <= d(H.wrist, H.pips[k]));
+  const palmW = d(H.indexMcp, H.pinkyMcp) || 1e-6;
+  const gap = (d(8, 12) + d(12, 16) + d(16, 20)) / 3 / palmW;
+  if (curled) {
+    out.push(chk("hand-spread", "Fingers flat", "warn", "Some fingers look curled.", HAND_TIP));
+  } else if (gap < HAND_SPREAD_MIN) {
+    out.push(
+      chk(
+        "hand-spread",
+        "Fingers flat",
+        "warn",
+        "Your fingers are pressed together.",
+        "Spread your fingers slightly apart."
+      )
+    );
+  } else {
+    out.push(chk("hand-spread", "Fingers flat", "pass", "Your hand is flat with fingers apart."));
   }
   return out;
 }
@@ -466,6 +661,14 @@ const LIVE_PRIORITY = [
   "face-centre",
   "body-facing",
   "body-upright",
+  "hand-found",
+  "hand-count",
+  "hand-fingers",
+  "hand-wrist",
+  "hand-size",
+  "hand-back",
+  "hand-spread",
+  "neck-visible",
   "lighting",
   "detector",
 ];
@@ -481,6 +684,14 @@ const LIVE_MESSAGE: Record<string, string> = {
   "body-height": "Move closer or tilt the phone so head to feet fills the frame",
   "body-facing": "Face the camera",
   "body-upright": "Stand straight",
+  "hand-found": "Show the back of your hand to the camera",
+  "hand-count": "Only one hand in the frame, please",
+  "hand-fingers": "Keep all five fingers inside the frame",
+  "hand-wrist": "Show your wrist in the frame",
+  "hand-size": "Move your hand closer",
+  "hand-back": "Turn your hand so the back faces the camera",
+  "hand-spread": "Spread your fingers slightly",
+  "neck-visible": "Include your neck and shoulders",
 };
 
 /** Pick the single most important message from live checks. */
@@ -585,6 +796,7 @@ export function rasterize(source: PhotoSource, maxSide = DETECT_MAX_SIDE, cropPo
 export const WASM_PATH = "/mediapipe/wasm";
 export const FACE_MODEL_PATH = "/models/blaze_face_short_range.tflite";
 export const POSE_MODEL_PATH = "/models/pose_landmarker_lite.task";
+export const HAND_MODEL_PATH = "/models/hand_landmarker.task";
 
 type Vision = typeof import("@mediapipe/tasks-vision");
 let visionPromise: Promise<{
@@ -592,6 +804,7 @@ let visionPromise: Promise<{
   fileset: Awaited<ReturnType<Vision["FilesetResolver"]["forVisionTasks"]>>;
 } | null> | null = null;
 let facePromise: Promise<import("@mediapipe/tasks-vision").FaceDetector | null> | null = null;
+let handPromise: Promise<import("@mediapipe/tasks-vision").HandLandmarker | null> | null = null;
 let posePromise: Promise<import("@mediapipe/tasks-vision").PoseLandmarker | null> | null = null;
 
 function loadVision() {
@@ -678,14 +891,47 @@ export async function detectPoses(
   }
 }
 
+/** Hands (landmarks + handedness), or null if the detector is unavailable. Never throws. */
+export async function detectHands(
+  source: HTMLCanvasElement | HTMLImageElement | HTMLVideoElement | ImageBitmap
+): Promise<HandDetection | null> {
+  try {
+    handPromise ??= (async () => {
+      const v = await loadVision();
+      if (!v) return null;
+      return withDelegateFallback((delegate) =>
+        v.lib.HandLandmarker.createFromOptions(v.fileset, {
+          baseOptions: { modelAssetPath: HAND_MODEL_PATH, delegate },
+          runningMode: "IMAGE",
+          numHands: 2,
+          minHandDetectionConfidence: 0.5,
+        })
+      );
+    })();
+    const det = await handPromise;
+    if (!det) return null;
+    const res = det.detect(source);
+    return {
+      hands: res.landmarks.map((lm, i) => {
+        const cat = res.handedness?.[i]?.[0];
+        const label = cat?.categoryName === "Left" || cat?.categoryName === "Right" ? cat.categoryName : undefined;
+        return { landmarks: lm.map((p) => ({ x: p.x, y: p.y })), handedness: label, score: cat?.score };
+      }),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /* ---------- Orchestration ---------- */
 
 export interface Deps {
   rasterize: typeof rasterize;
   detectFaces: typeof detectFaces;
   detectPoses: typeof detectPoses;
+  detectHands: typeof detectHands;
 }
-const defaultDeps: Deps = { rasterize, detectFaces, detectPoses };
+const defaultDeps: Deps = { rasterize, detectFaces, detectPoses, detectHands };
 
 const UNAVAILABLE = chk(
   "detector",
@@ -694,6 +940,20 @@ const UNAVAILABLE = chk(
   "Automatic face/body check unavailable",
   "We couldn't run the automatic check, so make sure the guide above is satisfied by eye."
 );
+
+/** Run the detector for `mode` and evaluate it; a missing detector becomes a single warn check. */
+async function detectorChecks(d: Deps, r: Raster, mode: PhotoMode): Promise<QualityCheck[]> {
+  if (mode === "face") {
+    const det = await d.detectFaces(r.detect);
+    return det ? evaluateFace(det, r.w, r.h) : [UNAVAILABLE];
+  }
+  if (mode === "hand") {
+    const det = await d.detectHands(r.detect);
+    return det ? evaluateHand(det, r.w, r.h) : [UNAVAILABLE];
+  }
+  const poses = await d.detectPoses(r.detect);
+  return poses ? evaluateBody(poses, r.w, r.h) : [UNAVAILABLE];
+}
 
 /** Same as checkPhoto with injectable dependencies (used by tests). */
 export async function checkPhotoWith(
@@ -711,13 +971,7 @@ export async function checkPhotoWith(
       if (w && h) checks.push(resolutionCheck(w, h));
       return buildReport(mode, checks);
     }
-    if (mode === "face") {
-      const det = await d.detectFaces(r.detect);
-      checks.push(...(det ? evaluateFace(det, r.w, r.h) : [UNAVAILABLE]));
-    } else {
-      const poses = await d.detectPoses(r.detect);
-      checks.push(...(poses ? evaluateBody(poses, r.w, r.h) : [UNAVAILABLE]));
-    }
+    checks.push(...(await detectorChecks(d, r, mode)));
     const px = analyzePixels(r.small.data, r.small.width, r.small.height);
     checks.push(lightingCheck(px.luma, px.leftRightDiff));
     checks.push(sharpnessCheck(sharpnessScore(px.gray, r.small.width, r.small.height)));
@@ -744,13 +998,7 @@ export async function liveCheck(
   const r = d.rasterize(video, 480, true);
   if (!r) return { message: "Starting camera", ready: false };
   const checks: QualityCheck[] = [];
-  if (mode === "face") {
-    const det = await d.detectFaces(r.detect);
-    checks.push(...(det ? evaluateFace(det, r.w, r.h) : [UNAVAILABLE]));
-  } else {
-    const poses = await d.detectPoses(r.detect);
-    checks.push(...(poses ? evaluateBody(poses, r.w, r.h) : [UNAVAILABLE]));
-  }
+  checks.push(...(await detectorChecks(d, r, mode)));
   const px = analyzePixels(r.small.data, r.small.width, r.small.height);
   checks.push(lightingCheck(px.luma, px.leftRightDiff));
   return guidanceFromChecks(checks, mode);

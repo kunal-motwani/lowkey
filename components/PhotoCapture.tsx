@@ -48,6 +48,7 @@ export default function PhotoCapture({ mode, onCapture, onClose }: Props) {
   const [phase, setPhase] = useState<Phase>("starting");
   const [errorKind, setErrorKind] = useState<CameraErrorKind>("error");
   const [count, setCount] = useState(COUNTDOWN_SECONDS);
+  const [facing, setFacing] = useState<"user" | "environment">("user");
   const [guide, setGuide] = useState<LiveGuidance>({ message: "Starting camera", ready: false });
   const [shot, setShot] = useState<{ file: File; url: string; report: QualityReport } | null>(null);
 
@@ -58,6 +59,7 @@ export default function PhotoCapture({ mode, onCapture, onClose }: Props) {
 
   const start = useCallback(async () => {
     setPhase("starting");
+    streamRef.current?.getTracks().forEach((t) => t.stop());
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia || !window.isSecureContext) {
       setErrorKind("unsupported");
       setPhase("error");
@@ -65,7 +67,7 @@ export default function PhotoCapture({ mode, onCapture, onClose }: Props) {
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 960 } },
+        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 960 } },
         audio: false,
       });
       streamRef.current = stream;
@@ -79,7 +81,7 @@ export default function PhotoCapture({ mode, onCapture, onClose }: Props) {
       setErrorKind(classifyCameraError(e));
       setPhase("error");
     }
-  }, []);
+  }, [facing]);
 
   useEffect(() => {
     void start();
@@ -139,9 +141,13 @@ export default function PhotoCapture({ mode, onCapture, onClose }: Props) {
           setPhase("error");
           return;
         }
-        const file = new File([blob], `${mode === "face" ? "selfie" : "body"}-${Date.now()}.jpg`, {
-          type: "image/jpeg",
-        });
+        const file = new File(
+          [blob],
+          `${mode === "face" ? "selfie" : mode === "hand" ? "hand" : "body"}-${Date.now()}.jpg`,
+          {
+            type: "image/jpeg",
+          }
+        );
         const report = await checkPhoto(canvas, mode);
         setShot({ file, url: URL.createObjectURL(file), report });
         setPhase("review");
@@ -169,7 +175,13 @@ export default function PhotoCapture({ mode, onCapture, onClose }: Props) {
   }, [onClose]);
 
   const live = phase === "live" || phase === "countdown";
-  const title = mode === "face" ? "Take a close-up selfie" : "Take a full-body photo";
+  const title =
+    mode === "face"
+      ? "Take a close-up selfie"
+      : mode === "hand"
+        ? "Take a photo of your hand"
+        : "Take a full-body photo";
+  const mirrored = facing === "user";
   const failed = shot ? !shot.report.ok : false;
 
   return (
@@ -200,7 +212,7 @@ export default function PhotoCapture({ mode, onCapture, onClose }: Props) {
             muted
             playsInline
             aria-label="Live camera preview"
-            className={`h-full w-full -scale-x-100 object-cover ${live || phase === "starting" || phase === "checking" ? "" : "hidden"}`}
+            className={`h-full w-full ${mirrored ? "-scale-x-100" : ""} object-cover ${live || phase === "starting" || phase === "checking" ? "" : "hidden"}`}
           />
           {phase === "review" && shot && (
             // eslint-disable-next-line @next/next/no-img-element
@@ -221,6 +233,19 @@ export default function PhotoCapture({ mode, onCapture, onClose }: Props) {
                   strokeWidth=".8"
                   strokeDasharray="3 2"
                 />
+              ) : mode === "hand" ? (
+                // Back of the hand, fingers slightly apart, wrist at the bottom. Hand spans about 70% of the width.
+                <g
+                  fill="none"
+                  stroke={guide.ready ? "#4ade80" : "white"}
+                  strokeOpacity=".9"
+                  strokeWidth=".8"
+                  strokeDasharray="3 2"
+                  strokeLinejoin="round"
+                >
+                  <path d="M28 96 L28 66 Q20 58 19 50 L15 36 Q14 32 18 32 Q21 32 22 36 L26 46 L26 22 Q26 18 30 18 Q34 18 34 22 L35 42 L36 14 Q36 10 40 10 Q44 10 44 14 L44 42 L47 18 Q47.500 14 51 15 Q54 16 53.500 20 L52 46 L57 28 Q58.500 25 61 26 Q64 27 63 30 L57 56 Q55 66 53 70 L53 96" />
+                  <line x1="24" y1="92" x2="57" y2="92" strokeDasharray="1.500 2" />
+                </g>
               ) : (
                 <g
                   fill="none"
@@ -278,9 +303,30 @@ export default function PhotoCapture({ mode, onCapture, onClose }: Props) {
               : "This photo needs a retake.")}
         </p>
 
+        {live && (
+          <p className="muted text-xs">
+            {mode === "hand"
+              ? "Place your hand flat, back of the hand towards the camera, fingers slightly apart, wrist in view."
+              : mode === "face"
+                ? "Fill the oval with your face and include your neck and shoulders."
+                : "Stand so your whole body, head to feet, fits the outline."}
+          </p>
+        )}
+
         {phase === "review" && shot && <QualityChecklist report={shot.report} />}
 
         <div className="flex gap-2">
+          {live && mode !== "face" && (
+            <button
+              type="button"
+              className="btn-ghost"
+              disabled={phase === "countdown"}
+              aria-label={`Switch camera (currently the ${facing === "user" ? "front" : "back"} camera)`}
+              onClick={() => setFacing((f) => (f === "user" ? "environment" : "user"))}
+            >
+              Flip camera
+            </button>
+          )}
           {live && (
             <button
               type="button"

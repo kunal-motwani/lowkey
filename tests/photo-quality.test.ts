@@ -5,6 +5,9 @@ import {
   checkPhotoWith,
   evaluateBody,
   evaluateFace,
+  evaluateHand,
+  backOfHandFacing,
+  type HandObservation,
   guidanceFromChecks,
   lightingCheck,
   resolutionCheck,
@@ -245,5 +248,139 @@ describe("checkPhotoWith", () => {
       detectPoses: async () => [pose()],
     });
     expect(status(r.checks, "orientation")).toBe("warn");
+  });
+});
+
+/** Right hand, back towards the camera, fingers up and slightly apart, on a square 1000x1000 image. */
+function hand(
+  over: Record<number, { x?: number; y?: number }> = {},
+  extra: Partial<HandObservation> = {}
+): HandObservation {
+  const lm: PoseLandmark[] = Array.from({ length: 21 }, () => ({ x: 0.5, y: 0.5 }));
+  const set = (i: number, x: number, y: number) => (lm[i] = { x, y });
+  set(0, 0.5, 0.85);
+  set(5, 0.4, 0.6);
+  set(17, 0.62, 0.62);
+  set(4, 0.25, 0.5);
+  set(8, 0.35, 0.2);
+  set(6, 0.37, 0.4);
+  set(12, 0.45, 0.12);
+  set(10, 0.46, 0.38);
+  set(16, 0.57, 0.17);
+  set(14, 0.57, 0.4);
+  set(20, 0.69, 0.3);
+  set(18, 0.66, 0.5);
+  for (const [i, o] of Object.entries(over)) lm[Number(i)] = { ...lm[Number(i)], ...o };
+  return { landmarks: lm, handedness: "Left", score: 0.95, ...extra }; // label is mirrored: "Left" = a right hand
+}
+
+describe("evaluateHand", () => {
+  it("passes a good back-of-hand photo", () => {
+    const r = evaluateHand([hand()], 1000, 1000);
+    expect(r.every((c) => c.status === "pass")).toBe(true);
+  });
+
+  it("fails with no hand and with two hands", () => {
+    expect(evaluateHand([], 1000, 1000)[0]).toMatchObject({ id: "hand-found", status: "fail" });
+    expect(status(evaluateHand([hand(), hand()], 1000, 1000), "hand-count")).toBe("fail");
+    expect(status(evaluateHand({ hands: [hand()] }, 1000, 1000), "hand-count")).toBe("pass");
+  });
+
+  it("fails when a fingertip is cut off", () => {
+    expect(status(evaluateHand([hand({ 12: { y: -0.05 } })], 1000, 1000), "hand-fingers")).toBe("fail");
+    expect(status(evaluateHand([hand({ 12: { y: 0.01 } })], 1000, 1000), "hand-fingers")).toBe("warn");
+  });
+
+  it("fails a small hand", () => {
+    const small = hand();
+    small.landmarks = small.landmarks.map((p) => ({ x: 0.5 + (p.x - 0.5) * 0.3, y: 0.5 + (p.y - 0.5) * 0.3 }));
+    expect(status(evaluateHand([small], 1000, 1000), "hand-size")).toBe("fail");
+  });
+
+  it("checks the wrist", () => {
+    expect(status(evaluateHand([hand({ 0: { y: 1.1 } })], 1000, 1000), "hand-wrist")).toBe("fail");
+    expect(status(evaluateHand([hand({ 0: { y: 0.98 } })], 1000, 1000), "hand-wrist")).toBe("warn");
+  });
+
+  it("warns, never fails, when the back of the hand is uncertain or the palm shows", () => {
+    expect(backOfHandFacing(hand(), 1000, 1000)).toBe(true);
+    expect(backOfHandFacing(hand({}, { handedness: "Right" }), 1000, 1000)).toBe(false);
+    expect(backOfHandFacing(hand({}, { handedness: undefined }), 1000, 1000)).toBeNull();
+    expect(backOfHandFacing(hand({}, { score: 0.3 }), 1000, 1000)).toBeNull();
+    for (const extra of [{ handedness: "Right" as const }, { handedness: undefined }, { score: 0.3 }]) {
+      const r = evaluateHand([hand({}, extra)], 1000, 1000);
+      expect(status(r, "hand-back")).toBe("warn");
+      expect(buildReport("hand", r).ok).toBe(true);
+    }
+  });
+
+  it("warns on curled or pressed-together fingers", () => {
+    expect(status(evaluateHand([hand({ 12: { x: 0.46, y: 0.6 } })], 1000, 1000), "hand-spread")).toBe("warn");
+    expect(
+      status(
+        evaluateHand([hand({ 8: { x: 0.43 }, 16: { x: 0.49 }, 20: { x: 0.53, y: 0.17 } })], 1000, 1000),
+        "hand-spread"
+      )
+    ).toBe("warn");
+  });
+});
+
+describe("neck-visible", () => {
+  it("warns when there is little room under the chin, but the face still passes", () => {
+    const f = faceBox(0.7); // bottom at ~78% of height: plenty of room
+    expect(status(evaluateFace([f], 1000, 1333), "neck-visible")).toBe("pass");
+    const low = { ...f, y: 1333 - f.h - f.h * 0.1 };
+    const r = evaluateFace([low], 1000, 1333);
+    const c = r.find((x) => x.id === "neck-visible");
+    expect(c?.status).toBe("warn");
+    expect(c?.tip).toBe("Include your neck and shoulders so necklaces can be shown");
+    expect(
+      buildReport(
+        "face",
+        r.filter((x) => x.id === "neck-visible")
+      ).ok
+    ).toBe(true);
+  });
+});
+
+describe("checkPhotoWith hand mode", () => {
+  const flatRaster = (): Raster => {
+    const data = new Uint8ClampedArray(16 * 16 * 4).fill(128);
+    return {
+      detect: {} as HTMLCanvasElement,
+      w: 1000,
+      h: 1000,
+      origW: 900,
+      origH: 1200,
+      small: { data, width: 16, height: 16 },
+    };
+  };
+  const src = {} as HTMLCanvasElement;
+  it("uses the hand detector and aggregates", async () => {
+    const r = await checkPhotoWith(src, "hand", {
+      rasterize: flatRaster,
+      detectHands: async () => ({ hands: [hand()] }),
+    });
+    expect(r.mode).toBe("hand");
+    expect(status(r.checks, "hand-size")).toBe("pass");
+    expect(status(r.checks, "orientation")).toBeUndefined();
+  });
+  it("fails on no hand and degrades gracefully", async () => {
+    const none = await checkPhotoWith(src, "hand", { rasterize: flatRaster, detectHands: async () => ({ hands: [] }) });
+    expect(none.ok).toBe(false);
+    const down = await checkPhotoWith(src, "hand", { rasterize: flatRaster, detectHands: async () => null });
+    expect(down.checks.some((c) => c.id === "detector")).toBe(true);
+    const boom = await checkPhotoWith(src, "hand", {
+      rasterize: flatRaster,
+      detectHands: async () => {
+        throw new Error("x");
+      },
+    });
+    expect(boom.checks.some((c) => c.id === "detector")).toBe(true);
+  });
+  it("gives hand live guidance", () => {
+    expect(guidanceFromChecks(evaluateHand([], 1000, 1000), "hand").message).toBe(
+      "Show the back of your hand to the camera"
+    );
   });
 });

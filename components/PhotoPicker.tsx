@@ -12,6 +12,8 @@ interface Props {
   /** Called with the accepted file, or (null, report) when a photo failed its checks. */
   onChange: (file: File | null, report: QualityReport | null) => void;
   optional?: boolean;
+  /** Called with true when the camera modal opens and false when it closes (also on unmount while open). */
+  onCameraOpenChange?: (open: boolean) => void;
 }
 
 function loadImage(url: string): Promise<HTMLImageElement> {
@@ -23,7 +25,7 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
-export default function PhotoPicker({ mode, label, hint, value, onChange, optional }: Props) {
+export default function PhotoPicker({ mode, label, hint, value, onChange, optional, onCameraOpenChange }: Props) {
   const uid = useRef(`pp-${Math.random().toString(36).slice(2, 8)}`).current;
   const fileRef = useRef<HTMLInputElement>(null);
   const [camera, setCamera] = useState(false);
@@ -32,6 +34,17 @@ export default function PhotoPicker({ mode, label, hint, value, onChange, option
   const [rejected, setRejected] = useState<{ url: string } | null>(null);
   const [decodeError, setDecodeError] = useState(false);
   const [url, setUrl] = useState<string | null>(null);
+
+  // Report camera open/close; the cleanup also fires when the picker unmounts while the camera is open.
+  const cameraCbRef = useRef(onCameraOpenChange);
+  useEffect(() => {
+    cameraCbRef.current = onCameraOpenChange;
+  });
+  useEffect(() => {
+    if (!camera) return;
+    cameraCbRef.current?.(true);
+    return () => cameraCbRef.current?.(false);
+  }, [camera]);
 
   // Object URL for the accepted file, revoked when it changes or on unmount.
   useEffect(() => {

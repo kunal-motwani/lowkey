@@ -2,7 +2,6 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { localSkinTone } from "./tone-local";
-import type { PieceRole } from "./types";
 
 /**
  * Typed YouCam API client: upload -> create task -> poll, with a disk cache
@@ -68,12 +67,13 @@ export interface TaskResults {
   output?: { type: string; ui_score: number }[];
   color?: ToneResult;
   url?: string;
+  download_url?: string;
 }
 export interface TaskData {
   task_status?: string;
   error_message?: string;
   error?: string;
-  results?: TaskResults | { download_url?: string }[];
+  results?: TaskResults | { download_url?: string; url?: string }[];
 }
 interface TaskPollResponse {
   data?: TaskData;
@@ -98,6 +98,8 @@ const KEY_ENV: Record<string, string> = {
   "skin-tone-analysis": "YOUCAM_KEY_TONE",
   "cloth-v4": "YOUCAM_KEY_CLOTHES",
   "makeup-vto": "YOUCAM_KEY_MAKEUP",
+  "shoes-transfer": "YOUCAM_KEY_SHOES",
+  jewellery: "YOUCAM_KEY_JEWELLERY",
 };
 export const hasYoucamKey = () => !!process.env.YOUCAM_API_KEY || Object.values(KEY_ENV).some((e) => !!process.env[e]);
 
@@ -147,17 +149,23 @@ export async function uploadFile(buf: Buffer, kind: string, contentType = "image
   return f.file_id as string;
 }
 
-export async function createTask(kind: string, body: Record<string, unknown>) {
-  const r = await api<TaskCreateResponse>(kind, "POST", `/s2s/v2.0/task/${kind}`, body);
+/** `taskPath` is the path after /s2s/v2.0/task/ when it differs from `kind` (kind also selects the API key). */
+export async function createTask(kind: string, body: Record<string, unknown>, taskPath: string = kind) {
+  const r = await api<TaskCreateResponse>(kind, "POST", `/s2s/v2.0/task/${taskPath}`, body);
   return r.data.task_id as string;
 }
 
 /** Poll with backoff + timeout. */
-export async function pollTask(kind: string, id: string, timeoutMs = 90_000): Promise<TaskData> {
+export async function pollTask(
+  kind: string,
+  id: string,
+  timeoutMs = 90_000,
+  taskPath: string = kind
+): Promise<TaskData> {
   const t0 = Date.now();
   let wait = 1500;
   while (Date.now() - t0 < timeoutMs) {
-    const r = await api<TaskPollResponse>(kind, "GET", `/s2s/v2.0/task/${kind}/${id}`);
+    const r = await api<TaskPollResponse>(kind, "GET", `/s2s/v2.0/task/${taskPath}/${id}`);
     const st = r.data?.task_status;
     if (st === "success") return r.data as TaskData;
     if (st === "error" || st === "failed")
@@ -170,7 +178,7 @@ export async function pollTask(kind: string, id: string, timeoutMs = 90_000): Pr
 
 /** Reported once per high-level call so callers can tell cache hits (free) from live API calls (cost units). */
 export interface CallInfo {
-  api: "skin" | "tone" | "vto" | "makeup";
+  api: "skin" | "tone" | "vto" | "makeup" | "shoes" | "jewellery";
   cached: boolean;
 }
 export interface CallOpts {
@@ -262,13 +270,15 @@ export function skinTone(img: Buffer, opts?: CallOpts) {
 }
 
 export type GarmentCategory = "upper_body" | "lower_body" | "full_body" | "shoes";
+export type ClothingRole = "top" | "bottom" | "jacket";
+export type JewelleryRole = "necklace" | "earrings" | "bracelet" | "ring";
 
 /**
  * The single place to change the garment_category sent to YouCam for each outfit role.
  * NOTE: the YouCam docs do not enumerate the allowed values; these are UNVERIFIED until a real run.
  * Per the docs, bottoms need a worn-outfit reference photo and a full-body person photo.
  */
-export const GARMENT_CATEGORY: Record<PieceRole, GarmentCategory> = {
+export const GARMENT_CATEGORY: Record<ClothingRole, GarmentCategory> = {
   top: "upper_body",
   bottom: "lower_body",
   jacket: "upper_body",
@@ -338,10 +348,10 @@ export function makeupTryOn(face: Buffer, plan: MakeupPlan, opts?: CallOpts) {
   );
 }
 
-/** Result image URL: `results.url` or the first array entry's `download_url`. */
+/** Result image URL, defensively: `results.url`, `results.download_url`, or the first array entry's `download_url`/`url`. */
 function resultUrl(d: TaskData): string {
   const r = d.results;
-  const url = Array.isArray(r) ? r[0]?.download_url : r?.url;
+  const url = Array.isArray(r) ? (r[0]?.download_url ?? r[0]?.url) : (r?.url ?? r?.download_url);
   if (!url) throw new Error("YouCam task finished without a result URL");
   return url;
 }
@@ -367,4 +377,147 @@ async function cachedImage(
   cachePutBin(key, b);
   opts?.onCall?.({ api, cached: false });
   return "data:image/jpeg;base64," + b.toString("base64");
+}
+
+/** Adds a helpful hint when an endpoint we could not verify is rejected. Task failures pass through untouched. */
+async function hintAssumed<T>(what: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (e) {
+    if (e instanceof YoucamTaskError) throw e;
+    const m = e instanceof Error ? e.message : String(e);
+    if (/-> (404|403)\b|InvalidParameters|invalid_parameter|not.?found/i.test(m)) {
+      throw new Error(
+        `${what} was rejected (${m}). This API may not be enabled for your key, or its endpoint is assumed: check JEWELLERY_TASK / SHOES_TASK in lib/youcam.ts.`
+      );
+    }
+    throw e;
+  }
+}
+
+export interface ShoesTaskSpec {
+  /** Task path after /s2s/v2.0/task/ (also used for polling). */
+  path: string;
+  /** true = endpoint and request shape confirmed (docs and/or live probing). */
+  verified: boolean;
+}
+
+/**
+ * Shoes endpoint. VERIFIED (docs + live probe: body {src_file_id, ref_file_id} is accepted, a task was created and ran): POST /s2s/v2.0/task/shoes-transfer {src_file_id (full-body person, foot fully
+ * visible), ref_file_id (one shoe product image, >= 512px), gender?, style?}; poll GET .../shoes-transfer/{id};
+ * output 1008x1344. The gender/style enum values are NOT documented, so they are omitted unless the caller passes them.
+ */
+export const SHOES_TASK: ShoesTaskSpec = { path: "shoes-transfer", verified: true };
+
+export interface JewelleryTaskSpec {
+  /** Task path after /s2s/v2.0/task/ (also used for polling). */
+  path: string;
+  /** Body field names for the optional intensity knobs (omitted by default). */
+  shadowField: string;
+  ambientField: string;
+  /** true = endpoint confirmed. All four are verified to EXIST for our key (made-up paths return 404 NotFound). */
+  verified: boolean;
+}
+
+/**
+ * Jewellery endpoints, ONE table so a first real run can correct them in a single place. Request body for all four
+ * (verified by live probing to pass the "required fields" validation, NOT yet verified end to end with real face/hand images):
+ * {src_file_id, ref_file_ids: [id], source_info: {name: src id}, object_infos: [{name: ref id, parameter?}]}.
+ * Optional `parameter` keys (omitted by default): <kind>_need_remove_background, <kind>_shadow_intensity (0-1),
+ * <kind>_ambient_light_intensity (0-1), <kind>_wearing_location / <kind>_anchor_point.
+ */
+export const JEWELLERY_TASK: Record<JewelleryRole, JewelleryTaskSpec> = {
+  // VERIFIED-FROM-DOCS: src_file_id front-facing, neck clearly visible (neck width >= 15% of image width, head
+  // rotation <= 20deg); ref_file_ids: necklace image, front-facing, background removed.
+  necklace: {
+    path: "2d-vto/necklace",
+    shadowField: "necklace_shadow_intensity",
+    ambientField: "necklace_ambient_light_intensity",
+    verified: true,
+  },
+  // VERIFIED-FROM-DOCS: src_file_id = back of wrist, all five fingers visible; ref_file_ids: bracelet in 3/4 front view (~45deg).
+  bracelet: {
+    path: "2d-vto/bracelet",
+    shadowField: "bracelet_shadow_intensity",
+    ambientField: "bracelet_ambient_light_intensity",
+    verified: true,
+  },
+  // VERIFIED-TO-EXIST by live probing (400 InvalidParameters, not 404); docs page not found, so the path spelling
+  // "earring" was inferred and the optional parameter names are ASSUMED-by-analogy. Fix here after a real run.
+  earrings: {
+    path: "2d-vto/earring",
+    shadowField: "earring_shadow_intensity",
+    ambientField: "earring_ambient_light_intensity",
+    verified: true,
+  },
+  // VERIFIED-TO-EXIST by live probing (400 InvalidParameters, not 404); optional parameter names are
+  // ASSUMED-by-analogy. Fix here after a real run.
+  ring: {
+    path: "2d-vto/ring",
+    shadowField: "ring_shadow_intensity",
+    ambientField: "ring_ambient_light_intensity",
+    verified: true,
+  },
+};
+
+export interface ShoesOpts extends CallOpts {
+  gender?: string;
+  style?: string;
+}
+
+/** Shoes try-on: person = full-body photo with the foot fully visible; shoe = one product image. Cached as bytes. */
+export function shoesTryOn(person: Buffer, shoe: Buffer, opts?: ShoesOpts) {
+  const extra = opts?.gender || opts?.style ? "_" + sha(`${opts?.gender}|${opts?.style}`) : "";
+  const h = sha(person) + "_" + sha(shoe) + "_shoes" + extra;
+  return cachedImage(
+    "shoes",
+    h,
+    () =>
+      hintAssumed("Shoes try-on", async () => {
+        const [s, r] = await Promise.all([uploadFile(person, "shoes-transfer"), uploadFile(shoe, "shoes-transfer")]);
+        const body: Record<string, unknown> = { src_file_id: s, ref_file_id: r };
+        if (opts?.gender) body.gender = opts.gender;
+        if (opts?.style) body.style = opts.style;
+        const t = await createTask("shoes-transfer", body, SHOES_TASK.path);
+        return resultUrl(await pollTask("shoes-transfer", t, 120_000, SHOES_TASK.path));
+      }),
+    opts
+  );
+}
+
+export interface JewelleryOpts extends CallOpts {
+  shadowIntensity?: number;
+  ambientLightIntensity?: number;
+}
+
+/** Jewellery try-on (necklace | earrings | bracelet | ring) on a face/neck or hand photo. The cache key includes the role. */
+export function jewelleryTryOn(role: JewelleryRole, person: Buffer, jewellery: Buffer, opts?: JewelleryOpts) {
+  const spec = JEWELLERY_TASK[role];
+  if (!spec) return Promise.reject(new Error(`Unsupported jewellery role: ${role}`));
+  const knobs =
+    opts?.shadowIntensity != null || opts?.ambientLightIntensity != null
+      ? "_" + sha(`${opts?.shadowIntensity}|${opts?.ambientLightIntensity}`)
+      : "";
+  const h = `${role}_` + sha(person) + "_" + sha(jewellery) + knobs;
+  return cachedImage(
+    "jewellery",
+    h,
+    () =>
+      hintAssumed(`${role} try-on`, async () => {
+        const [s, r] = await Promise.all([uploadFile(person, "jewellery"), uploadFile(jewellery, "jewellery")]);
+        // The live API wants BOTH the file-id form and the source_info/object_infos form.
+        const parameter: Record<string, unknown> = {};
+        if (opts?.shadowIntensity != null) parameter[spec.shadowField] = opts.shadowIntensity;
+        if (opts?.ambientLightIntensity != null) parameter[spec.ambientField] = opts.ambientLightIntensity;
+        const body: Record<string, unknown> = {
+          src_file_id: s,
+          ref_file_ids: [r],
+          source_info: { name: s },
+          object_infos: [{ name: r, ...(Object.keys(parameter).length ? { parameter } : {}) }],
+        };
+        const t = await createTask("jewellery", body, spec.path);
+        return resultUrl(await pollTask("jewellery", t, 120_000, spec.path));
+      }),
+    opts
+  );
 }

@@ -1,5 +1,6 @@
 import { hexToRgb, hslToRgb, rgbToHex, rgbToHsl, rgbToLab } from "./color";
 import { undertoneOf } from "./flattery";
+import { ROLE_GROUP } from "./types";
 import type { MakeupTip, OutfitScore } from "./types";
 import type { SkinMetrics, ToneResult } from "./youcam";
 
@@ -32,8 +33,27 @@ export function makeupTips(outfit: OutfitScore, tone: ToneResult, metrics: SkinM
   const c = outfit.concerns;
   const under = outfit.undertone ?? undertoneOf(tone);
   const skinLab = rgbToLab(hexToRgb(tone.skin_color));
-  // Garment closest to the face drives colour-matching decisions.
-  const anchor = [...outfit.pieces].sort((a, b) => b.weight - a.weight)[0];
+  // Clothing closest to the face drives colour-matching decisions (jewellery/shoes only if nothing else is given).
+  const byWeight = [...outfit.pieces].sort((a, b) => b.weight - a.weight);
+  const anchor = byWeight.find((p) => ROLE_GROUP[p.role] === "clothing") ?? byWeight[0];
+  // Jewellery: prefer pieces worn near the face when choosing the metal to echo.
+  const jewelOrder = ["necklace", "earrings", "bracelet", "ring"];
+  const jewels = outfit.pieces
+    .filter((p) => ROLE_GROUP[p.role] === "jewellery")
+    .sort((a, b) => jewelOrder.indexOf(a.role) - jewelOrder.indexOf(b.role));
+  const metalPiece = jewels.find((p) => p.metal === "gold" || p.metal === "rose-gold" || p.metal === "silver");
+  const warmMetal = metalPiece?.metal === "gold" || metalPiece?.metal === "rose-gold";
+  const metalWord = metalPiece?.metal === "rose-gold" ? "rose gold" : metalPiece?.metal;
+  const metalWhy = metalPiece ? `your ${metalPiece.role} reads as ${metalWord} (${metalPiece.hex})` : "";
+  const boldColour = (p: { hex: string; metal?: string }) => {
+    const x = rgbToHsl(hexToRgb(p.hex));
+    return p.metal === "dark" || (p.metal === "other" && x.s >= 0.5);
+  };
+  const boldNecklace = jewels.find((p) => p.role === "necklace" && boldColour(p));
+  const colouredEarrings = jewels.find((p) => p.role === "earrings" && p.metal === "other");
+  const earringsMetal = jewels.find(
+    (p) => p.role === "earrings" && (p.metal === "gold" || p.metal === "rose-gold" || p.metal === "silver")
+  );
   const g = anchor ? rgbToHsl(hexToRgb(anchor.hex)) : { h: 0, s: 0, l: 0.5 };
   const family = hueName(g.h, g.s, g.l);
   const garmentDesc = anchor ? `your ${anchor.role} (${anchor.hex}, ${family})` : "your outfit";
@@ -130,6 +150,18 @@ export function makeupTips(outfit: OutfitScore, tone: ToneResult, metrics: SkinM
     blushTip = "Keep blush a soft, slightly warmer nude-rose so it does not compete with the pink garment.";
     blushWhy = `${garmentDesc} is a saturated pink`;
   }
+  const strongGarment = c.redness >= 45 || satRedLike || satOrange || satPink;
+  if (metalPiece && !strongGarment) {
+    blush = warmMetal ? "#e8997f" : "#d98a9c";
+    blushTip = warmMetal
+      ? `A peach or apricot blush tends to echo your ${metalWord} jewellery and keeps the look cohesive.`
+      : `A soft rose-pink blush tends to sit well beside your silver jewellery.`;
+    blushWhy = `${metalWhy}, alongside a ${under} undertone`;
+  }
+  if (boldNecklace) {
+    blushTip += " Keep the application light because your necklace is the bold element.";
+    blushWhy += `; your necklace (${boldNecklace.hex}) is a bold piece`;
+  }
   tips.push({ area: "blush", tip: blushTip, why: blushWhy, shade: blush });
 
   // Lip: undertone, but never matching/fighting a saturated garment.
@@ -144,6 +176,13 @@ export function makeupTips(outfit: OutfitScore, tone: ToneResult, metrics: SkinM
     lipWhy = `${under} undertone, and ${garmentDesc} leaves room for a colour accent`;
   } else {
     lipWhy = `${under} undertone, and ${garmentDesc} is neutral so the lip can carry the colour`;
+  }
+  if (metalPiece && !(satRedLike || satPink || satOrange)) {
+    lip = warmMetal ? "#c4574a" : "#a8405f";
+    lipTip = warmMetal
+      ? `A warm coral or terracotta lip tends to echo your ${metalWord} jewellery.`
+      : "A cooler berry lip tends to pair nicely with your silver jewellery.";
+    lipWhy = `${metalWhy}, with a ${under} undertone`;
   }
   tips.push({ area: "lip", tip: lipTip, why: lipWhy, shade: lip });
 
@@ -172,12 +211,18 @@ export function makeupTips(outfit: OutfitScore, tone: ToneResult, metrics: SkinM
     liner = "#2f4a4a";
     linerName = "deep teal";
   }
-  tips.push({
-    area: "eyes",
-    tip: `Try ${linerName} liner or shadow along the lash line; ${isNeutral ? "with a neutral garment it adds a touch of colour and definition" : `it sits opposite ${family} on the colour wheel, which tends to make the eyes stand out`}.`,
-    why: `${garmentDesc} is ${family}; this is a colour-wheel suggestion, not a measured effect.`,
-    shade: liner,
-  });
+  let eyeTip = `Try ${linerName} liner or shadow along the lash line; ${isNeutral ? "with a neutral garment it adds a touch of colour and definition" : `it sits opposite ${family} on the colour wheel, which tends to make the eyes stand out`}.`;
+  let eyeWhy = `${garmentDesc} is ${family}; this is a colour-wheel suggestion, not a measured effect.`;
+  if (colouredEarrings) {
+    liner = under === "cool" ? "#4a3b52" : "#5b3a29";
+    eyeTip = `Keep eye makeup soft and neutral, a ${under === "cool" ? "taupe or plum-grey" : "warm brown"} shadow with a thin liner, so it does not fight your coloured earrings.`;
+    eyeWhy = `Your earrings (${colouredEarrings.hex}) are a strong colour near the eyes.`;
+  } else if (earringsMetal) {
+    const w = earringsMetal.metal === "silver" ? "a soft silver-grey" : "a champagne-gold";
+    eyeTip += ` A touch of ${w} shimmer on the lid can echo your earrings.`;
+    eyeWhy += ` Your earrings read as ${earringsMetal.metal === "rose-gold" ? "rose gold" : earringsMetal.metal} (${earringsMetal.hex}).`;
+  }
+  tips.push({ area: "eyes", tip: eyeTip, why: eyeWhy, shade: liner });
 
   // Brows.
   const hair = tone.hair_color;

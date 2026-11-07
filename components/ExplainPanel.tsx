@@ -3,6 +3,10 @@ import {
   clampScore,
   formatDelta,
   formatEvidence,
+  groupPieces,
+  metalLabel,
+  metalRule,
+  metalSwatch,
   mutedReason,
   ruleState,
   safeHex,
@@ -93,6 +97,18 @@ function Counterfactuals({ items }: { items: Counterfactual[] }) {
   );
 }
 
+function metalNote(piece: PieceScore) {
+  const rule = metalRule(piece);
+  if (!rule) return null;
+  const evidence = (rule.evidence ?? []).map(formatEvidence).filter(Boolean);
+  return (
+    <p className="muted mt-3 text-xs">
+      Metal check: {rule.applicable ? rule.explanation : mutedReason(rule)}
+      {evidence.length > 0 && ` (${evidence.join("; ")})`}
+    </p>
+  );
+}
+
 function PieceBreakdown({ piece, percent, threshold }: { piece: PieceScore; percent: number; threshold: number }) {
   const wf = buildWaterfall(piece);
   const bySeg = new Map(wf.segments.map((s) => [s.rule, s]));
@@ -111,6 +127,16 @@ function PieceBreakdown({ piece, percent, threshold }: { piece: PieceScore; perc
         <div className="min-w-0 flex-1">
           <h3 className="font-bold">{PIECE_LABEL[piece.role]}</h3>
           <p className="muted text-xs">Counts for {percent}% of the outfit score</p>
+          {piece.metal && (
+            <span className="chip mt-1 !py-0.5 !text-xs">
+              <i
+                aria-hidden="true"
+                className="inline-block h-3 w-3 rounded-full border"
+                style={{ background: metalSwatch(piece.metal), borderColor: "var(--line)" }}
+              />
+              {metalLabel(piece.metal)}
+            </span>
+          )}
         </div>
         <div className="text-right">
           <div className="text-xl font-extrabold" style={{ color: `var(--${tone})` }}>
@@ -129,6 +155,8 @@ function PieceBreakdown({ piece, percent, threshold }: { piece: PieceScore; perc
           <span className="wf-bar wf-bar-base" style={{ left: 0, width: `${wf.baseWidth}%` }} />
         </div>
       </div>
+
+      {piece.metal && metalNote(piece)}
 
       <ul className="m-0 mt-3 list-none space-y-3 p-0">
         {rules.map((r) => (
@@ -172,8 +200,15 @@ export default function ExplainPanel({ outfit }: { outfit: OutfitScore }) {
       </div>
 
       {pieces.length === 0 && <p className="muted text-sm">No piece breakdown was returned for this run.</p>}
-      {pieces.map((p, i) => (
-        <PieceBreakdown key={p.role} piece={p} percent={percents[i]} threshold={threshold} />
+      {groupPieces(pieces).map((g) => (
+        <div key={g.group} className="space-y-3" role="group" aria-labelledby={`why-g-${g.group}`}>
+          <h3 id={`why-g-${g.group}`} className="wiz-group-h">
+            {g.label}
+          </h3>
+          {g.items.map(({ piece, index }) => (
+            <PieceBreakdown key={piece.role} piece={piece} percent={percents[index]} threshold={threshold} />
+          ))}
+        </div>
       ))}
 
       <details className="card">
@@ -185,8 +220,8 @@ export default function ExplainPanel({ outfit }: { outfit: OutfitScore }) {
           </p>
           <p>
             The outfit score is a weighted average of the piece scores. Pieces nearer your face weigh more, which is why
-            a top or jacket counts for more than a bottom. A score of {threshold} or more reads as &quot;buy with
-            confidence&quot;; below that reads as &quot;think twice&quot;.
+            a top, jacket, necklace or earrings count for more than a bottom or shoes. A score of {threshold} or more
+            reads as &quot;buy with confidence&quot;; below that reads as &quot;think twice&quot;.
           </p>
           <p>
             Honest limits: readings are estimates from one photo and depend on lighting and your camera. Colours on

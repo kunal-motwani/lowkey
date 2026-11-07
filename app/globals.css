@@ -291,3 +291,123 @@ body {
 .wf-muted {
   opacity: 0.7;
 }
+.wiz-group-h {
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0.35rem;
+}
+.wiz-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.75rem;
+  text-align: center;
+  font-size: 0.8rem;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+}
+
+/* ---- background music toggle ---- */
+.mu-root {
+  position: fixed;
+  right: 1rem;
+  bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-direction: row-reverse;
+}
+@media (min-width: 768px) {
+  .mu-root {
+    bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+  }
+}
+.mu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 9999px;
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  color: var(--fg);
+  opacity: 0.75;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition:
+    opacity 0.2s ease,
+    transform 0.15s ease;
+}
+.mu-btn[aria-pressed="true"] {
+  color: var(--accent);
+  opacity: 0.95;
+}
+.mu-btn:hover,
+.mu-root:focus-within .mu-btn {
+  opacity: 1;
+}
+.mu-panel {
+  display: flex;
+  align-items: center;
+  max-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  padding: 0;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  border: 1px solid transparent;
+  transition:
+    max-width 0.2s ease,
+    opacity 0.2s ease,
+    padding 0.2s ease;
+}
+.mu-root:hover .mu-panel,
+.mu-root:focus-within .mu-panel {
+  max-width: 10rem;
+  opacity: 1;
+  padding: 0 0.75rem;
+  border-color: var(--line);
+  min-height: 44px;
+}
+.mu-slider {
+  width: 7rem;
+  min-height: 44px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.mu-hint {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 0.5rem);
+  white-space: nowrap;
+  margin: 0;
+  padding: 0.4rem 0.8rem;
+  border-radius: 0.75rem;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 0.8rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+.mu-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mu-btn,
+  .mu-panel {
+    transition: none;
+  }
+}

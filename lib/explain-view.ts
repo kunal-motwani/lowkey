@@ -1,5 +1,15 @@
 /** Pure view-model helpers for the explainable result screen. No React, no server imports. */
-import type { MakeupTip, PieceScore, RuleEvidence, RuleResult } from "./types";
+import type {
+  MakeupTip,
+  PieceGroup,
+  PieceRole,
+  PieceScore,
+  RuleEvidence,
+  RuleResult,
+  SourcePhoto,
+  TryOnStage,
+} from "./types";
+import { PIECE_LABEL, ROLE_GROUP, ROLE_REQUIRES } from "./types";
 
 const HEX_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
@@ -182,8 +192,123 @@ export function groupTips(tips: MakeupTip[] | undefined): TipGroup[] {
 /** Where a pipeline failure message most likely belongs in the wizard (1 face, 2 body, 3 pieces, 4 review). */
 export function stepForError(message: string): 1 | 2 | 3 | 4 {
   const m = message.toLowerCase();
-  if (/full[- ]body|body photo|\bbody\b/.test(m)) return 2;
-  if (/\bface\b|selfie|close-up/.test(m)) return 1;
-  if (/garment|\btop\b|bottom|jacket|link|url|product|piece|image address/.test(m)) return 3;
+  if (/full[- ]body|body photo|\bbody\b|hand photo|\bhand\b|wrist/.test(m)) return 2;
+  if (/\bface\b|selfie|close-up|\bneck\b/.test(m)) return 1;
+  if (
+    /garment|\btop\b|bottom|jacket|shoe|necklace|earring|bracelet|\bring\b|jewel|link|url|product|piece|image address/.test(
+      m
+    )
+  )
+    return 3;
   return 4;
 }
+
+/* ---------- Pieces: groups, metals, requirements, stages ---------- */
+
+export const GROUP_ORDER: PieceGroup[] = ["clothing", "footwear", "jewellery"];
+export const GROUP_LABEL: Record<PieceGroup, string> = {
+  clothing: "Clothing",
+  footwear: "Footwear",
+  jewellery: "Jewellery",
+};
+
+/** Roles in display order, grouped. */
+export function rolesByGroup(roles: PieceRole[]): { group: PieceGroup; label: string; roles: PieceRole[] }[] {
+  return GROUP_ORDER.map((group) => ({
+    group,
+    label: GROUP_LABEL[group],
+    roles: roles.filter((r) => ROLE_GROUP[r] === group),
+  })).filter((g) => g.roles.length > 0);
+}
+
+/** Groups scored pieces by ROLE_GROUP, keeping each piece's original index (for weight percents). */
+export function groupPieces<T extends { role: PieceRole }>(
+  pieces: T[] | undefined
+): { group: PieceGroup; label: string; items: { piece: T; index: number }[] }[] {
+  const list = (pieces ?? []).map((piece, index) => ({ piece, index }));
+  return GROUP_ORDER.map((group) => ({
+    group,
+    label: GROUP_LABEL[group],
+    items: list.filter((x) => ROLE_GROUP[x.piece.role] === group),
+  })).filter((g) => g.items.length > 0);
+}
+
+export const METAL_LABEL: Record<string, string> = {
+  gold: "Gold",
+  silver: "Silver",
+  "rose-gold": "Rose gold",
+  dark: "Dark metal",
+  other: "Other finish",
+};
+export const METAL_SWATCH: Record<string, string> = {
+  gold: "#d4a935",
+  silver: "#b9bec6",
+  "rose-gold": "#d99a8a",
+  dark: "#3a3a40",
+  other: "#9ca3af",
+};
+
+/** "Gold metal", "Rose gold metal"; empty string when unknown. */
+export function metalLabel(metal: string | undefined | null): string {
+  if (!metal) return "";
+  const name = METAL_LABEL[metal] ?? metal.replace(/-/g, " ").replace(/^./, (c) => c.toUpperCase());
+  return metal === "dark" || metal === "other" ? name : `${name} metal`;
+}
+export function metalSwatch(metal: string | undefined | null): string {
+  return (metal && METAL_SWATCH[metal]) || METAL_SWATCH.other;
+}
+
+/** The metal-undertone rule of a jewellery piece (id contains "metal"), if present. */
+export function metalRule(piece: Pick<PieceScore, "rules">): RuleResult | undefined {
+  return (piece.rules ?? []).find((r) => /metal/i.test(r.rule));
+}
+
+export type PhotoStatus = Partial<Record<SourcePhoto, boolean>>;
+export interface MissingPhoto {
+  role: PieceRole;
+  photo: SourcePhoto;
+}
+
+/** Roles that need a photo that has not passed its checks, derived from ROLE_REQUIRES. */
+export function missingPhotosFor(roles: PieceRole[], photos: PhotoStatus): MissingPhoto[] {
+  const out: MissingPhoto[] = [];
+  for (const role of roles) {
+    const need = ROLE_REQUIRES[role];
+    if (need && !photos[need]) out.push({ role, photo: need });
+  }
+  return out;
+}
+
+/** Wizard step that holds a given photo (face on 1; body and hand on 2). */
+export function stepForPhoto(photo: SourcePhoto): 1 | 2 {
+  return photo === "face" ? 1 : 2;
+}
+
+const PHOTO_NAME: Record<SourcePhoto, string> = { face: "face photo", body: "full-body photo", hand: "hand photo" };
+
+/** Plain-language blocking message, e.g. "Bottom and Shoes need the full-body photo. Add one, or remove them." */
+export function missingMessage(missing: MissingPhoto[]): string {
+  if (missing.length === 0) return "";
+  const parts: string[] = [];
+  for (const photo of ["face", "body", "hand"] as SourcePhoto[]) {
+    const names = missing.filter((m) => m.photo === photo).map((m) => PIECE_LABEL[m.role]);
+    if (names.length === 0) continue;
+    const joined = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}` : names[0];
+    parts.push(
+      `${joined} ${names.length > 1 ? "need" : "needs"} the ${PHOTO_NAME[photo]} from step ${stepForPhoto(photo)}.`
+    );
+  }
+  return `${parts.join(" ")} Add the photo, or remove ${missing.length > 1 ? "those pieces" : "that piece"}.`;
+}
+
+/** Splits stages into the full-length chain and the jewellery close-ups. Stages without a group count as outfit. */
+export function splitStages(stages: TryOnStage[] | undefined): { outfit: TryOnStage[]; closeups: TryOnStage[] } {
+  const all = stages ?? [];
+  return {
+    outfit: all.filter((s) => s.group !== "closeup"),
+    closeups: all.filter((s) => s.group === "closeup"),
+  };
+}
+
+export const CLOSEUP_FAIL_HINT =
+  "This try-on may not be enabled for your YouCam key. The score and reasons above are not affected.";

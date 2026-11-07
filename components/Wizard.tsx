@@ -3,11 +3,12 @@ import { useEffect, useRef, useState } from "react";
 
 import OutfitSlots, { EMPTY_OUTFIT, pieceFilled } from "@/components/OutfitSlots";
 import type { OutfitInput, PieceInput } from "@/components/OutfitSlots";
+import { useMusicDuck, useMusicMood } from "@/components/MusicProvider";
 import PhotoPicker from "@/components/PhotoPicker";
 import WizardResult from "@/components/WizardResult";
 import WizardSafeImg, { useObjectUrl } from "@/components/WizardSafeImg";
 import WizardTimeline from "@/components/WizardTimeline";
-import { stepForError } from "@/lib/explain-view";
+import { missingMessage, missingPhotosFor, stepForError } from "@/lib/explain-view";
 import type { AgentEvent, StepId } from "@/lib/steps";
 import type { AnalysisResult, PieceRole, QualityReport } from "@/lib/types";
 import { PIECE_LABEL, PIECE_ROLES } from "@/lib/types";
@@ -19,21 +20,21 @@ const STEP_INFO: Record<StepNo, { title: string; why: string; todo: string[]; sh
   1: {
     title: "Your face photo",
     short: "Face",
-    why: "We read your skin from this photo, so the colour advice is about your face today, not a generic one.",
+    why: "We read your skin from this photo, so the colour advice is about your face today, not a generic one. Your neck and shoulders also help us try on necklaces and earrings.",
     todo: [
-      "Close-up: your face fills the oval",
+      "Close-up: your face fills the oval, include your neck and shoulders",
       "Natural light from a window, facing it",
       "No filter, no heavy beauty mode",
     ],
   },
   2: {
-    title: "Full-body photo (optional)",
-    short: "Body",
-    why: "Needed for bottoms and a full-length look. Without it we try tops and jackets on your chest-up photo only.",
+    title: "Body and hand photos (optional)",
+    short: "Body, hand",
+    why: "Both are optional. Add only what your outfit needs: the body photo for bottoms and shoes, the hand photo for bracelets and rings.",
     todo: [
-      "Stand straight, head to feet in frame",
-      "Plain background if you can",
-      "Fitted or simple clothes underneath",
+      "Body: stand straight, head to feet in frame, plain background if you can",
+      "Hand: back of your hand towards the camera, fingers slightly apart, wrist in view",
+      "Skip both if you only want tops, jackets, necklaces or earrings",
     ],
   },
   3: {
@@ -41,9 +42,9 @@ const STEP_INFO: Record<StepNo, { title: string; why: string; todo: string[]; sh
     short: "Outfit",
     why: "Each piece is scored on its own, then combined, so you can see which one helps or hurts.",
     todo: [
-      "Pick at least one: Top, Bottom or Jacket",
+      "Pick at least one piece: clothing, shoes or jewellery",
       "Use a sample, upload, or paste a link",
-      "Garment on a plain background works best",
+      "A product on a plain background works best",
     ],
   },
   4: {
@@ -62,6 +63,8 @@ export default function Wizard({ onExit }: { onExit?: () => void }) {
   const [faceReport, setFaceReport] = useState<QualityReport | null>(null);
   const [body, setBody] = useState<File | null>(null);
   const [bodyReport, setBodyReport] = useState<QualityReport | null>(null);
+  const [hand, setHand] = useState<File | null>(null);
+  const [handReport, setHandReport] = useState<QualityReport | null>(null);
   const [outfit, setOutfit] = useState<OutfitInput>(EMPTY_OUTFIT);
   const [message, setMessage] = useState("");
   const [serverError, setServerError] = useState("");
@@ -71,10 +74,28 @@ export default function Wizard({ onExit }: { onExit?: () => void }) {
 
   const faceUrl = useObjectUrl(face);
   const bodyUrl = useObjectUrl(body);
+  const handUrl = useObjectUrl(hand);
 
   const faceOk = Boolean(face && faceReport?.ok);
   const hasBody = Boolean(body && bodyReport?.ok);
+  const hasHand = Boolean(hand && handReport?.ok);
   const filledRoles = PIECE_ROLES.filter((r) => pieceFilled(outfit[r]));
+
+  const photos = { face: faceOk, body: hasBody, hand: hasHand };
+  const musicMood =
+    phase === "running"
+      ? "processing"
+      : phase === "result" && result
+        ? result.outfit.verdict === "buy"
+          ? "celebrate"
+          : "caution"
+        : step === 3
+          ? "focus"
+          : "calm";
+  useMusicMood(musicMood);
+  // Lower the background music while any camera preview is open.
+  const [camOpen, setCamOpen] = useState({ face: false, body: false, hand: false });
+  useMusicDuck(camOpen.face || camOpen.body || camOpen.hand);
 
   // Move focus to the heading whenever the step or phase changes.
   useEffect(() => {
@@ -95,11 +116,13 @@ export default function Wizard({ onExit }: { onExit?: () => void }) {
     if (n === 2 && body && !bodyReport?.ok) {
       return "The full-body photo did not pass the quality check. Retake it, or remove it to continue without one.";
     }
+    if (n === 2 && hand && !handReport?.ok) {
+      return "The hand photo did not pass the quality check. Retake it, or remove it to continue without one.";
+    }
     if (n === 3) {
-      if (filledRoles.length === 0) return "Choose at least one piece: a Top, a Bottom or a Jacket.";
-      if (pieceFilled(outfit.bottom) && !hasBody) {
-        return "A Bottom needs the full-body photo from step 2. Add one, or remove the Bottom.";
-      }
+      if (filledRoles.length === 0) return "Choose at least one piece: clothing, shoes or jewellery.";
+      const missing = missingPhotosFor(filledRoles, photos);
+      if (missing.length > 0) return missingMessage(missing);
     }
     return "";
   }
@@ -130,6 +153,7 @@ export default function Wizard({ onExit }: { onExit?: () => void }) {
     const fd = new FormData();
     if (face) fd.append("face", face);
     if (body && hasBody) fd.append("body", body);
+    if (hand && hasHand) fd.append("hand", hand);
     for (const role of PIECE_ROLES) {
       const p = outfit[role];
       if (p.file) fd.append(role, p.file);
@@ -182,7 +206,7 @@ export default function Wizard({ onExit }: { onExit?: () => void }) {
   }
 
   function again() {
-    // Keep both photos; go back to the outfit step with empty slots.
+    // Keep the photos; go back to the outfit step with empty slots.
     setOutfit(EMPTY_OUTFIT);
     setResult(null);
     setProgress({});
@@ -261,8 +285,9 @@ export default function Wizard({ onExit }: { onExit?: () => void }) {
       {step === 1 && (
         <PhotoPicker
           mode="face"
+          onCameraOpenChange={(open) => setCamOpen((c) => ({ ...c, face: open }))}
           label="Face photo"
-          hint="Close-up, face fills the oval, natural light from a window, no filter"
+          hint="Close-up, face fills the oval, include your neck and shoulders, natural light, no filter"
           value={face}
           onChange={(f, r) => {
             setFace(f);
@@ -273,26 +298,54 @@ export default function Wizard({ onExit }: { onExit?: () => void }) {
       )}
 
       {step === 2 && (
-        <PhotoPicker
-          mode="body"
-          label="Full-body photo"
-          hint="Head to feet in frame, standing straight, good light"
-          value={body}
-          optional
-          onChange={(f, r) => {
-            setBody(f);
-            setBodyReport(f ? r : null);
-            setMessage("");
-          }}
-        />
+        <div className="space-y-4">
+          <div className="card space-y-2">
+            <h2 className="font-bold">Full-body photo</h2>
+            <p className="muted text-sm">Needed for bottoms and shoes. Without it we try on tops and jackets only.</p>
+            <PhotoPicker
+              mode="body"
+              onCameraOpenChange={(open) => setCamOpen((c) => ({ ...c, body: open }))}
+              label="Full-body photo"
+              hint="Head to feet in frame, standing straight, good light"
+              value={body}
+              optional
+              onChange={(f, r) => {
+                setBody(f);
+                setBodyReport(f ? r : null);
+                setMessage("");
+              }}
+            />
+          </div>
+          <div className="card space-y-2">
+            <h2 className="font-bold">Hand photo</h2>
+            <p className="muted text-sm">Needed for bracelets and rings. Skip it if you are not trying either on.</p>
+            <PhotoPicker
+              mode="hand"
+              onCameraOpenChange={(open) => setCamOpen((c) => ({ ...c, hand: open }))}
+              label="Hand photo"
+              hint="Back of your hand towards the camera, fingers slightly apart, wrist in view"
+              value={hand}
+              optional
+              onChange={(f, r) => {
+                setHand(f);
+                setHandReport(f ? r : null);
+                setMessage("");
+              }}
+            />
+          </div>
+        </div>
       )}
 
-      {step === 3 && (
-        <OutfitSlots value={outfit} onChange={setPiece} hasBodyPhoto={hasBody} onGoToBody={() => goto(2)} />
-      )}
+      {step === 3 && <OutfitSlots value={outfit} onChange={setPiece} photos={photos} onGoToStep={(n) => goto(n)} />}
 
       {step === 4 && (
-        <Review faceUrl={faceUrl} bodyUrl={hasBody ? bodyUrl : null} outfit={outfit} roles={filledRoles} />
+        <Review
+          faceUrl={faceUrl}
+          bodyUrl={hasBody ? bodyUrl : null}
+          handUrl={hasHand ? handUrl : null}
+          outfit={outfit}
+          roles={filledRoles}
+        />
       )}
 
       <p role="alert" aria-live="assertive" className={message ? "wf-alert" : "sr-only"}>
@@ -313,7 +366,7 @@ export default function Wizard({ onExit }: { onExit?: () => void }) {
         )}
         {step < 4 ? (
           <button type="button" className="btn-primary" onClick={next}>
-            {step === 2 && !body ? "Skip, continue without" : "Next"}
+            {step === 2 && !body && !hand ? "Skip, continue without" : "Next"}
           </button>
         ) : (
           <button type="button" className="btn-primary" onClick={() => void submit()}>
@@ -331,7 +384,7 @@ function PieceThumb({ role, input }: { role: PieceRole; input: PieceInput }) {
   return (
     <li className="flex items-center gap-3 text-sm">
       {src ? (
-        <WizardSafeImg src={src} alt={`${PIECE_LABEL[role]} garment`} className="thumb h-16 w-12 shrink-0" />
+        <WizardSafeImg src={src} alt={`${PIECE_LABEL[role]} piece`} className="thumb h-16 w-12 shrink-0" />
       ) : (
         <div className="skeleton muted flex h-16 w-12 shrink-0 items-center justify-center rounded-lg text-[10px]">
           link
@@ -340,7 +393,7 @@ function PieceThumb({ role, input }: { role: PieceRole; input: PieceInput }) {
       <div className="min-w-0">
         <b>{PIECE_LABEL[role]}</b>
         <div className="muted break-all text-xs">
-          {input.file ? input.file.name : input.url.trim() ? input.url.trim() : "Sample garment"}
+          {input.file ? input.file.name : input.url.trim() ? input.url.trim() : "Sample image"}
         </div>
       </div>
     </li>
@@ -350,11 +403,13 @@ function PieceThumb({ role, input }: { role: PieceRole; input: PieceInput }) {
 function Review({
   faceUrl,
   bodyUrl,
+  handUrl,
   outfit,
   roles,
 }: {
   faceUrl: string | null;
   bodyUrl: string | null;
+  handUrl: string | null;
   outfit: OutfitInput;
   roles: PieceRole[];
 }) {
@@ -377,6 +432,16 @@ function Review({
             )}
             <figcaption className="muted mt-1">Body</figcaption>
           </figure>
+          <figure className="m-0 text-center text-xs">
+            {handUrl ? (
+              <WizardSafeImg src={handUrl} alt="Hand photo" className="thumb h-24 w-20" />
+            ) : (
+              <div className="skeleton muted flex h-24 w-20 items-center justify-center rounded-xl p-1 text-[10px]">
+                Not added
+              </div>
+            )}
+            <figcaption className="muted mt-1">Hand</figcaption>
+          </figure>
         </div>
       </div>
       <div className="card">
@@ -387,7 +452,9 @@ function Review({
           ))}
         </ul>
         {roles.length > 1 && (
-          <p className="muted mt-3 text-xs">Layered in this order: Top, then Bottom, then Jacket over the top.</p>
+          <p className="muted mt-3 text-xs">
+            Layered in this order: Top, Bottom, Jacket, then Shoes. Jewellery is shown in close-ups.
+          </p>
         )}
       </div>
       <div className="card text-sm">
@@ -397,8 +464,8 @@ function Review({
           the outfit on you layer by layer, with a better colour or makeup tips if it needs help.
         </p>
         <p className="muted mt-2 text-xs">
-          Cost note: each piece = one YouCam try-on, so {roles.length} piece{roles.length === 1 ? "" : "s"} means about{" "}
-          {roles.length} try-on{roles.length === 1 ? "" : "s"} plus the skin reading. Repeat photos are cached.
+          Cost note: each piece is about one YouCam try-on, so {roles.length} piece{roles.length === 1 ? "" : "s"} means
+          about {roles.length} try-on{roles.length === 1 ? "" : "s"} plus the skin reading. Repeat photos are cached.
         </p>
       </div>
     </div>

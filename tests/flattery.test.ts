@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { bestColorways, concernSeverity, rescueMakeup, scoreGarment, scorePiece, undertoneOf } from "../lib/flattery";
+import {
+  ROLE_WEIGHT,
+  bestColorways,
+  classifyMetal,
+  concernSeverity,
+  rescueMakeup,
+  scoreGarment,
+  scorePiece,
+  undertoneOf,
+} from "../lib/flattery";
+import type { PieceRole } from "../lib/types";
 
 const G = { olive: "#7d8239", coral: "#f0705a", navy: "#1f2f5c" } as const;
 const warm = { skin_color: "#d9a07c" };
@@ -196,5 +206,173 @@ describe("bestColorways", () => {
     expect(ways).toHaveLength(3);
     for (let i = 1; i < ways.length; i++) expect(ways[i - 1].score).toBeGreaterThanOrEqual(ways[i].score);
     expect(ways.every((w) => /^#[0-9a-f]{6}$/.test(w.hex))).toBe(true);
+  });
+});
+
+describe("classifyMetal (colour heuristic, not material detection)", () => {
+  const table: [string, string][] = [
+    ["#c9a227", "gold"],
+    ["#e6c75a", "gold"],
+    ["#c0c0c0", "silver"],
+    ["#e8e8ee", "silver"],
+    ["#b76e79", "rose-gold"],
+    ["#e0bfb8", "rose-gold"],
+    ["#1a1a1a", "dark"],
+    ["#2a9d8f", "other"],
+    ["#8a5a2b", "other"],
+  ];
+  for (const [hex, metal] of table) it(`${hex} -> ${metal}`, () => expect(classifyMetal(hex)).toBe(metal));
+});
+
+describe("shoes", () => {
+  const NAVY = "#1f2f5c";
+  const rule = (p: ReturnType<typeof scorePiece>, id: string) => p.rules.find((r) => r.rule === id)!;
+  const ctx = {
+    topHex: "#e8e8e8",
+    others: [
+      { role: "top" as PieceRole, hex: "#e8e8e8" },
+      { role: "bottom" as PieceRole, hex: NAVY },
+    ],
+  };
+
+  it("skips face-reflection rules with a Not evaluated explanation and has no metal", () => {
+    const p = scorePiece("shoes", "#8a5a2b", warm, { ...base, redness: 25 }, ctx);
+    for (const id of ["sallow-reflection", "redness-echo", "wash-out"]) {
+      const r = rule(p, id);
+      expect(r.applicable).toBe(false);
+      expect(r.delta).toBe(0);
+      expect(r.explanation).toMatch(/^Not evaluated:/);
+    }
+    expect(p.metal).toBeUndefined();
+    expect(p.weight).toBe(ROLE_WEIGHT.shoes);
+  });
+
+  it("applies half-strength undertone clash", () => {
+    const cool = { skin_color: "#e8b4c0" };
+    expect(rule(scorePiece("shoes", "#8a5a2b", cool, base, ctx), "undertone-clash").delta).toBe(-11);
+  });
+
+  it("neutral shoes are safe and tie top and bottom", () => {
+    const p = scorePiece("shoes", "#1c1c1c", warm, base, ctx);
+    expect(rule(p, "shoe-harmony").delta).toBe(0);
+    expect(rule(p, "shoe-neutral-tie").delta).toBe(2);
+    const noBottom = scorePiece("shoes", "#1c1c1c", warm, base, { others: [{ role: "top", hex: "#e8e8e8" }] });
+    expect(rule(noBottom, "shoe-neutral-tie").applicable).toBe(false);
+  });
+
+  it("rewards a matching saturated shoe and penalises two competing accents", () => {
+    const match = scorePiece("shoes", "#d83020", warm, base, { others: [{ role: "top", hex: "#e04030" }] });
+    expect(rule(match, "shoe-harmony").delta).toBe(3);
+    const single = scorePiece("shoes", "#d83020", warm, base, { others: [{ role: "top", hex: "#e8e8e8" }] });
+    expect(rule(single, "shoe-harmony").delta).toBe(2);
+    const clash = scorePiece("shoes", "#d83020", warm, base, { others: [{ role: "top", hex: "#1a9a4a" }] });
+    expect(rule(clash, "shoe-harmony").delta).toBeLessThan(-4);
+    expect(rule(scorePiece("shoes", "#d83020", warm, base), "shoe-harmony").applicable).toBe(false);
+  });
+
+  it("counterfactuals are sensible shoe colours and match rescoring", () => {
+    const c = { others: [{ role: "top" as PieceRole, hex: "#1a9a4a" }] };
+    const p = scorePiece("shoes", "#d83020", warm, base, c);
+    expect(p.counterfactuals.length).toBeGreaterThan(0);
+    for (const cf of p.counterfactuals) {
+      expect(["Black", "White", "Tan", "Brown", "Navy", "Grey", "Burgundy"]).toContain(cf.name);
+      expect(scorePiece("shoes", cf.hex, warm, base, c).score).toBe(cf.score);
+    }
+  });
+});
+
+describe("jewellery", () => {
+  const rule = (p: ReturnType<typeof scorePiece>, id: string) => p.rules.find((r) => r.rule === id)!;
+  const GOLD = "#c9a227";
+  const SILVER = "#c0c0c0";
+  const ROSE = "#b76e79";
+  const tones = {
+    warm: { skin_color: "#e0b050" },
+    cool: { skin_color: "#e8b4c0" },
+    neutral: { skin_color: "#d9a07c" },
+  };
+
+  it("undertone x metal matrix", () => {
+    const expected: Record<string, Record<string, number>> = {
+      warm: { [GOLD]: 4, [SILVER]: -5, [ROSE]: 3 },
+      cool: { [GOLD]: -5, [SILVER]: 4, [ROSE]: -2 },
+      neutral: { [GOLD]: 3, [SILVER]: 3, [ROSE]: 3 },
+    };
+    for (const [u, tone] of Object.entries(tones))
+      for (const [hex, d] of Object.entries(expected[u])) {
+        const r = rule(scorePiece("ring", hex, tone, base), "metal-undertone-match");
+        expect(undertoneOf(tone)).toBe(u);
+        expect(r.delta).toBe(d);
+        expect(r.applicable).toBe(true);
+        if (d < 0) expect(r.explanation).toMatch(/guideline, not a law/);
+      }
+  });
+
+  it("sets metal and skips the metal rule for dark or stone colours", () => {
+    expect(scorePiece("necklace", GOLD, warm, base).metal).toBe("gold");
+    const dark = scorePiece("bracelet", "#1a1a1a", warm, base);
+    expect(dark.metal).toBe("dark");
+    expect(rule(dark, "metal-undertone-match").applicable).toBe(false);
+    expect(rule(dark, "metal-undertone-match").explanation).toMatch(/^Not evaluated:/);
+  });
+
+  it("skips face-reflection rules for all jewellery", () => {
+    for (const role of ["necklace", "earrings", "bracelet", "ring"] as PieceRole[]) {
+      const p = scorePiece(role, GOLD, warm, { ...base, redness: 25 });
+      for (const id of ["sallow-reflection", "redness-echo", "wash-out"]) {
+        expect(rule(p, id).applicable).toBe(false);
+        expect(rule(p, id).explanation).toMatch(/^Not evaluated:/);
+      }
+    }
+  });
+
+  it("undertone clash only for strongly coloured stones on necklace/earrings, at half strength", () => {
+    const cool = { skin_color: "#e8b4c0" };
+    const amber = "#c0650a";
+    expect(rule(scorePiece("earrings", amber, cool, base), "undertone-clash").applicable).toBe(true);
+    expect(rule(scorePiece("earrings", amber, cool, base), "undertone-clash").delta).toBe(-11);
+    expect(rule(scorePiece("ring", amber, cool, base), "undertone-clash").applicable).toBe(false);
+    expect(rule(scorePiece("necklace", GOLD, cool, base), "undertone-clash").applicable).toBe(false);
+  });
+
+  it("jewellery-vs-neckline compares metal with the top colour", () => {
+    const navyTop = { topHex: "#1f2f5c" };
+    expect(rule(scorePiece("necklace", GOLD, warm, base, navyTop), "jewellery-vs-neckline").delta).toBe(3);
+    expect(rule(scorePiece("necklace", SILVER, warm, base, navyTop), "jewellery-vs-neckline").delta).toBe(3);
+    const same = rule(scorePiece("earrings", SILVER, warm, base, { topHex: "#c4c4c4" }), "jewellery-vs-neckline");
+    expect(same.delta).toBe(-3);
+    expect(rule(scorePiece("necklace", GOLD, warm, base), "jewellery-vs-neckline").applicable).toBe(false);
+    expect(rule(scorePiece("ring", GOLD, warm, base, navyTop), "jewellery-vs-neckline").applicable).toBe(false);
+  });
+
+  it("accent-balance penalises a third competing accent on a ring", () => {
+    const others = [
+      { role: "shoes" as PieceRole, hex: "#d83020" },
+      { role: "earrings" as PieceRole, hex: "#1a9a4a" },
+    ];
+    const over = rule(scorePiece("ring", "#2040c8", warm, base, { others }), "accent-balance");
+    expect(over.triggered).toBe(true);
+    expect(over.delta).toBe(-3);
+    expect(over.explanation).toMatch(/^Note:/);
+    expect(rule(scorePiece("ring", GOLD, warm, base, { others }), "accent-balance").delta).toBe(0);
+    expect(rule(scorePiece("necklace", GOLD, warm, base), "accent-balance").applicable).toBe(false);
+  });
+
+  it("counterfactuals suggest other metals with representative hexes that match rescoring", () => {
+    const p = scorePiece("necklace", SILVER, tones.warm, base);
+    expect(p.counterfactuals.map((c) => c.hex).sort()).toEqual([GOLD, ROSE].sort());
+    expect(p.counterfactuals[0].name).toBe("Gold");
+    expect(p.counterfactuals[0].delta).toBeGreaterThan(0);
+    expect(p.counterfactuals[0].why).toMatch(/gold finish/);
+    for (const cf of p.counterfactuals) {
+      expect(scorePiece("necklace", cf.hex, tones.warm, base).score).toBe(cf.score);
+      expect(cf.score - p.score).toBe(cf.delta);
+    }
+  });
+
+  it("is deterministic", () => {
+    expect(scorePiece("necklace", GOLD, warm, base, { topHex: "#1f2f5c" })).toEqual(
+      scorePiece("necklace", GOLD, warm, base, { topHex: "#1f2f5c" })
+    );
   });
 });

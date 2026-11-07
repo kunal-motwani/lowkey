@@ -59,10 +59,13 @@ describe("POST /api/analyze", () => {
   it.each([
     [{}, /Missing face/],
     [{ sampleTop: "navy-shirt.jpg" }, /Missing face/],
-    [{ sampleFace: "olive-tee.jpg" }, /at least one garment/],
+    [{ sampleFace: "olive-tee.jpg" }, /at least one piece/],
     [{ sampleFace: "../../etc/passwd", sampleTop: "navy-shirt.jpg" }, /not valid/],
     [{ sampleFace: "olive-tee.jpg", sampleTop: "nonexistent.jpg" }, /not available/],
-    [{ sampleFace: "olive-tee.jpg", sampleBottom: "navy-shirt.jpg" }, /full-body photo to try on bottoms/],
+    [{ sampleFace: "olive-tee.jpg", sampleBottom: "navy-shirt.jpg" }, /full-body photo \(head to feet\)/],
+    [{ sampleFace: "olive-tee.jpg", sampleShoes: "navy-shirt.jpg" }, /bottoms and shoes/],
+    [{ ...OK, sampleBracelet: "navy-shirt.jpg" }, /back of your hand/],
+    [{ ...OK, sampleRing: "navy-shirt.jpg" }, /back of your hand/],
   ])("emits an SSE fail event for bad input %#", async (fields, msg) => {
     const res = await POST(req(fields));
     expect(res.headers.get("Content-Type")).toBe("text/event-stream");
@@ -101,6 +104,34 @@ describe("POST /api/analyze", () => {
     );
     expect(events.map((e) => e.event)).toEqual(["result"]);
     expect(vi.mocked(runStylist).mock.calls[0][0].pieces.map((p) => p.role)).toEqual(["bottom"]);
+  });
+
+  it("accepts a hand photo and the new roles", async () => {
+    vi.mocked(runStylist).mockResolvedValue({} as never);
+    const events = await sse(
+      await POST(
+        req({
+          ...OK,
+          hand: await bodyFile(),
+          body: await bodyFile(),
+          sampleShoes: "coral-top.jpg",
+          sampleNecklace: "navy-shirt.jpg",
+          sampleEarrings: "navy-shirt.jpg",
+          sampleBracelet: "navy-shirt.jpg",
+          sampleRing: "olive-tee.jpg",
+        })
+      )
+    );
+    expect(events.map((e) => e.event)).toEqual(["result"]);
+    const input = vi.mocked(runStylist).mock.calls[0][0];
+    expect(Buffer.isBuffer(input.hand)).toBe(true);
+    expect(input.pieces.map((p) => p.role)).toEqual(["top", "shoes", "necklace", "earrings", "bracelet", "ring"]);
+  });
+
+  it("only takes the hand photo as a file (no sample)", async () => {
+    const events = await sse(await POST(req({ ...OK, sampleBracelet: "navy-shirt.jpg", sampleHand: "olive-tee.jpg" })));
+    expect(events[0].data.message).toMatch(/back of your hand/);
+    expect(runStylist).not.toHaveBeenCalled();
   });
 
   it("reports unexpected agent failures with a generic message", async () => {

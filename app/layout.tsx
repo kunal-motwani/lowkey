@@ -1,4 +1,6 @@
 import type { Metadata, Viewport } from "next";
+import MusicProvider from "@/components/MusicProvider";
+import MusicToggle from "@/components/MusicToggle";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -22,7 +24,10 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <html lang="en">
       {/* Browser extensions (e.g. VS Code preview) add classes to <body> before hydration. */}
       <body className="antialiased" suppressHydrationWarning>
-        {children}
+        <MusicProvider>
+          {children}
+          <MusicToggle />
+        </MusicProvider>
       </body>
     </html>
   );

@@ -4,6 +4,8 @@ import { makeupTips } from "./makeup-tips";
 import type { AgentEvent, StepId } from "./steps";
 import {
   PIECE_LABEL,
+  PIECE_ROLES,
+  ROLE_GROUP,
   type AnalysisResult,
   type OutfitScore,
   type PieceRole,
@@ -13,11 +15,15 @@ import {
 import {
   clothesTryOn,
   GARMENT_CATEGORY,
+  jewelleryTryOn,
   makeupTryOn,
+  shoesTryOn,
   skinAnalysis,
   skinTone,
   type CallInfo,
   type CallOpts,
+  type ClothingRole,
+  type JewelleryRole,
 } from "./youcam";
 
 export type { AgentEvent, StepId } from "./steps";
@@ -32,13 +38,16 @@ export class InputError extends Error {
 
 export interface StylistInput {
   face: Buffer;
+  /** Full-body photo including the feet; required for bottoms and shoes. */
   body?: Buffer;
+  /** Back of the hand/wrist with fingers visible; required for bracelets and rings. */
+  hand?: Buffer;
   pieces: { role: PieceRole; image: Buffer }[];
 }
 
 type Emit = (e: AgentEvent) => void;
 
-/** Layering order for the try-on chain. */
+/** Clothing layering order for the full-length chain (shoes are applied last, on the latest image). */
 const LAYER_ORDER: PieceRole[] = ["top", "bottom", "jacket"];
 /** Pieces that sit next to the face and so affect skin/colour harmony most. */
 const FACE_ADJACENT: PieceRole[] = ["top", "jacket"];
@@ -47,19 +56,31 @@ const FACE_ADJACENT: PieceRole[] = ["top", "jacket"];
  * ROUGH estimate of YouCam units per live (uncached) call. These are placeholders, not published prices:
  * adjust once real billing is known. Cache hits cost nothing and are excluded.
  */
-export const UNITS_PER_CALL: Record<CallInfo["api"], number> = { skin: 1, tone: 1, vto: 1, makeup: 1 };
+export const UNITS_PER_CALL: Record<CallInfo["api"], number> = {
+  skin: 1,
+  tone: 1,
+  vto: 1,
+  makeup: 1,
+  shoes: 1,
+  jewellery: 1,
+};
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const toBuffer = (dataUrl: string) => Buffer.from(dataUrl.split(",")[1] ?? "", "base64");
 
 export async function runStylist(input: StylistInput, emit: Emit): Promise<AnalysisResult> {
-  const { face, body } = input;
-  if (!input.pieces.length) throw new InputError("Add at least one garment (top, bottom or jacket).");
-  if (input.pieces.some((p) => p.role === "bottom") && !body) {
-    throw new InputError("Add a full-body photo to try on bottoms");
+  const { face, body, hand } = input;
+  if (!input.pieces.length) throw new InputError("Add at least one piece (clothing, shoes or jewellery).");
+  const has = (r: PieceRole) => input.pieces.some((p) => p.role === r);
+  if ((has("bottom") || has("shoes")) && !body) {
+    throw new InputError("Add a full-body photo (head to feet) to try on bottoms and shoes");
+  }
+  if ((has("bracelet") || has("ring")) && !hand) {
+    throw new InputError("Add a photo of the back of your hand to try on bracelets and rings");
   }
   const pieceImages = new Map<PieceRole, Buffer>(input.pieces.map((p) => [p.role, p.image]));
-  const roles = LAYER_ORDER.filter((r) => pieceImages.has(r));
+  const roles = PIECE_ROLES.filter((r) => pieceImages.has(r));
+  const clothing = LAYER_ORDER.filter((r) => pieceImages.has(r));
 
   const errors: string[] = [];
   let units = 0;
@@ -99,24 +120,75 @@ export async function runStylist(input: StylistInput, emit: Emit): Promise<Analy
   // 4. Decide
   step("decide", "done", undefined, outfit.verdict === "buy" ? "Buy with confidence" : "Below 70 - planning fixes");
 
-  // 5. Layered try-on: top -> bottom -> jacket; each stage's output is the next person image
+  // 5. Try-on. Full-length chain ("outfit"): top -> bottom -> jacket -> shoes, each output feeds the next.
+  // Then jewellery close-ups ("closeup"): necklace/earrings on the chest-up image, bracelet/ring on the hand photo.
   const photoNotes: string[] = [];
-  if (!body) photoNotes.push("No body photo: chest-up try-on only");
-  step("tryon", "running", "AI Clothes Virtual Try-On", `${roles.length} piece(s), layered`);
+  if (!body && clothing.length > 0) photoNotes.push("No body photo: chest-up try-on only");
+  step("tryon", "running", "AI Clothes / Shoes / Jewellery Virtual Try-On", `${roles.length} piece(s), layered`);
   const stages: TryOnStage[] = [];
-  let person = body ?? face;
-  const worn: PieceRole[] = [];
-  for (const role of roles) {
-    worn.push(role);
-    const label = stages.length === 0 ? PIECE_LABEL[role] : `+ ${PIECE_LABEL[role]}`;
+  const runStage = async (
+    group: "outfit" | "closeup",
+    chain: PieceRole[],
+    role: PieceRole,
+    person: Buffer,
+    call: () => Promise<string>
+  ): Promise<Buffer> => {
+    const label = chain.length === 0 ? PIECE_LABEL[role] : `+ ${PIECE_LABEL[role]}`;
+    const worn = [...chain, role];
     try {
-      const image = await clothesTryOn(person, pieceImages.get(role)!, GARMENT_CATEGORY[role], track());
-      stages.push({ label, roles: [...worn], image });
-      person = toBuffer(image);
+      const image = await call();
+      stages.push({ label, roles: worn, image, group });
+      return toBuffer(image);
     } catch (e) {
       errors.push(`Try-on (${PIECE_LABEL[role]}): ${msg(e)}`);
-      stages.push({ label, roles: [...worn] });
+      stages.push({ label, roles: worn, group });
+      return person;
     }
+  };
+
+  // Outfit chain on the full-length image (or the face photo when there is no body photo).
+  let person: Buffer = body ?? face;
+  const outfitChain: PieceRole[] = [];
+  const outfitRoles: PieceRole[] = [...clothing, ...(pieceImages.has("shoes") ? (["shoes"] as PieceRole[]) : [])];
+  for (const role of outfitRoles) {
+    const garment = pieceImages.get(role)!;
+    const base = person;
+    person = await runStage("outfit", outfitChain, role, base, () =>
+      role === "shoes"
+        ? shoesTryOn(base, garment, track())
+        : clothesTryOn(base, garment, GARMENT_CATEGORY[role as ClothingRole], track())
+    );
+    outfitChain.push(role);
+  }
+  const outfitStages = stages.slice();
+
+  // Close-up base: the chest-up try-on image when the outfit chain ran on the face photo, else the plain face photo
+  // (no extra paid calls just to build it).
+  const lastOutfit = [...outfitStages].reverse().find((s) => s.image);
+  const chestUp = !body && lastOutfit?.image ? toBuffer(lastOutfit.image) : face;
+  const closeupChain: PieceRole[] = !body && lastOutfit ? [...lastOutfit.roles] : [];
+  if (body && clothing.length > 0 && (pieceImages.has("necklace") || pieceImages.has("earrings"))) {
+    photoNotes.push("Necklace and earrings are shown on your face photo, not on the clothed try-on");
+  }
+  let neck: Buffer = chestUp;
+  for (const role of ["necklace", "earrings"] as const) {
+    if (!pieceImages.has(role)) continue;
+    const base = neck;
+    const jewel = pieceImages.get(role)!;
+    neck = await runStage("closeup", closeupChain, role, base, () => jewelleryTryOn(role, base, jewel, track()));
+    closeupChain.push(role);
+  }
+  // Hand chain: bracelet then ring on the hand photo.
+  let handImg: Buffer = hand ?? face;
+  const handChain: PieceRole[] = [];
+  for (const role of ["bracelet", "ring"] as const) {
+    if (!pieceImages.has(role)) continue;
+    const base = handImg;
+    const jewel = pieceImages.get(role)!;
+    handImg = await runStage("closeup", handChain, role, base, () =>
+      jewelleryTryOn(role as JewelleryRole, base, jewel, track())
+    );
+    handChain.push(role);
   }
   const okStages = stages.filter((s) => s.image).length;
   step("tryon", okStages === 0 ? "error" : "done", undefined, `${okStages}/${stages.length} stages rendered`);
@@ -144,7 +216,7 @@ export async function runStylist(input: StylistInput, emit: Emit): Promise<Analy
       better = b;
       try {
         const recolored = await recolorGarment(pieceImages.get(target.role)!, target.hex, cf.hex);
-        b.image = await clothesTryOn(face, recolored, GARMENT_CATEGORY[target.role], track());
+        b.image = await clothesTryOn(face, recolored, GARMENT_CATEGORY[target.role as ClothingRole], track());
       } catch (e) {
         errors.push(`Recolor try-on: ${msg(e)}`);
       }
@@ -162,12 +234,13 @@ export async function runStylist(input: StylistInput, emit: Emit): Promise<Analy
     let rescueBase: Buffer = face;
     try {
       const adj = roles.filter((r) => FACE_ADJACENT.includes(r));
-      const last = stages[stages.length - 1];
+      const last = outfitStages[outfitStages.length - 1];
       if (!body && last?.image) {
         rescueBase = toBuffer(last.image); // the base person was the face photo: reuse the stage image
       } else if (adj.length > 0) {
         let p = face;
-        for (const r of adj) p = toBuffer(await clothesTryOn(p, pieceImages.get(r)!, GARMENT_CATEGORY[r], track()));
+        for (const r of adj)
+          p = toBuffer(await clothesTryOn(p, pieceImages.get(r)!, GARMENT_CATEGORY[r as ClothingRole], track()));
         rescueBase = p;
       }
     } catch (e) {
@@ -248,6 +321,7 @@ async function explain(
                 score: outfit.score,
                 verdict: outfit.verdict,
                 summary: outfit.summary,
+                pieces: outfit.pieces.map((p) => ({ piece: p.role, group: ROLE_GROUP[p.role], score: p.score })),
                 betterColour: better && { piece: better.role, name: better.name, score: better.score },
                 makeupNote: rescue?.plan.note,
               }

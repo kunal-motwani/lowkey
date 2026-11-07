@@ -6,7 +6,7 @@ import MakeupTipsList from "@/components/MakeupTipsList";
 import ScoreRing from "@/components/ScoreRing";
 import StageGallery from "@/components/StageGallery";
 import WizardTimeline from "@/components/WizardTimeline";
-import { clampScore, safeHex } from "@/lib/explain-view";
+import { clampScore, metalLabel, safeHex } from "@/lib/explain-view";
 import type { AgentEvent, StepId } from "@/lib/steps";
 import type { AnalysisResult } from "@/lib/types";
 import { PIECE_LABEL } from "@/lib/types";
@@ -82,6 +82,7 @@ export default function WizardResult({
                 style={{ background: safeHex(p.hex) }}
               />
               {PIECE_LABEL[p.role]} {p.hex}
+              {p.metal ? `, ${metalLabel(p.metal).toLowerCase()}` : ""}
             </span>
           ))}
         </div>

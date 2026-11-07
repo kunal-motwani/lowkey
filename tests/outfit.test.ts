@@ -163,3 +163,94 @@ describe("rescueMakeupFor", () => {
     expect(rescueMakeupFor(o2).concealer).toBe("#f2b48f");
   });
 });
+
+describe("shoes and jewellery in the outfit", () => {
+  const GOLD = "#c9a227";
+  const ALL: PieceRole[] = ["top", "jacket", "bottom", "shoes", "necklace", "earrings", "bracelet", "ring"];
+  const hexFor = (r: PieceRole) =>
+    r === "shoes" ? "#1c1c1c" : r === "necklace" || r === "earrings" || r === "bracelet" || r === "ring" ? GOLD : NAVY;
+
+  it("exposes the documented weights", () => {
+    expect(ROLE_WEIGHT).toMatchObject({ shoes: 0.1, necklace: 0.1, earrings: 0.1, bracelet: 0.05, ring: 0.05 });
+  });
+
+  it("normalises weights to 1 for every subset of roles", () => {
+    for (let mask = 1; mask < 1 << ALL.length; mask++) {
+      const roles = ALL.filter((_, i) => mask & (1 << i));
+      const o = scoreOutfit(
+        roles.map((role) => ({ role, hex: hexFor(role) })),
+        warm,
+        base
+      );
+      expect(o.pieces.reduce((s, p) => s + p.weight, 0)).toBeCloseTo(1, 10);
+      expect(o.pieces).toHaveLength(roles.length);
+    }
+  });
+
+  it("keeps weights proportional and rejects repeated roles", () => {
+    const o = scoreOutfit(
+      [
+        { role: "top", hex: NAVY },
+        { role: "shoes", hex: "#1c1c1c" },
+        { role: "ring", hex: GOLD },
+      ],
+      warm,
+      base
+    );
+    const w = Object.fromEntries(o.pieces.map((p) => [p.role, p.weight]));
+    expect(w.top).toBeCloseTo(0.5 / 0.65);
+    expect(w.ring).toBeCloseTo(0.05 / 0.65);
+    expect(() =>
+      scoreOutfit(
+        [
+          { role: "ring", hex: GOLD },
+          { role: "ring", hex: GOLD },
+        ],
+        warm,
+        base
+      )
+    ).toThrow(/more than once/);
+  });
+
+  it("works with jewellery only", () => {
+    const o = scoreOutfit([{ role: "ring", hex: GOLD }], warm, base);
+    expect(o.pieces[0].metal).toBe("gold");
+    expect(o.summary.length).toBeGreaterThanOrEqual(2);
+    expect(o.summary.length).toBeLessThanOrEqual(4);
+  });
+
+  it("summary mentions jewellery and shoes when they moved the score, and not otherwise", () => {
+    const withExtras = scoreOutfit(
+      [
+        { role: "top", hex: NAVY },
+        { role: "necklace", hex: GOLD },
+        { role: "shoes", hex: "#1c1c1c" },
+      ],
+      warm,
+      base
+    );
+    const text = withExtras.summary.join(" ").toLowerCase();
+    expect(text).toContain("shoes and jewellery");
+    expect(text).toContain("necklace");
+    expect(withExtras.summary.length).toBeLessThanOrEqual(4);
+    const plain = scoreOutfit([{ role: "top", hex: NAVY }], warm, base);
+    expect(plain.summary.join(" ").toLowerCase()).not.toContain("jewellery");
+  });
+
+  it("jewellery counterfactual in the summary is consistent with the piece", () => {
+    const cool = { skin_color: "#e8b4c0" };
+    const o = scoreOutfit([{ role: "necklace", hex: GOLD }], cool, base);
+    const cf = o.pieces[0].counterfactuals[0];
+    expect(cf.name).toBe("Silver");
+    expect(cf.hex).toBe("#c0c0c0");
+    const text = o.summary.join(" ");
+    expect(text).toContain(cf.hex);
+    expect(text).toContain(`+${cf.delta}`);
+    expect(text.toLowerCase()).toContain("silver metal");
+  });
+
+  it("is deterministic", () => {
+    const pieces = ALL.map((role) => ({ role, hex: hexFor(role) }));
+    expect(scoreOutfit(pieces, warm, base)).toEqual(scoreOutfit(pieces, warm, base));
+  });
+});

@@ -1,7 +1,8 @@
 "use client";
 import WizardSafeImg, { useObjectUrl } from "@/components/WizardSafeImg";
-import type { PieceRole } from "@/lib/types";
-import { PIECE_LABEL, PIECE_ROLES } from "@/lib/types";
+import { missingMessage, missingPhotosFor, rolesByGroup, stepForPhoto } from "@/lib/explain-view";
+import type { PieceRole, SourcePhoto } from "@/lib/types";
+import { PIECE_LABEL, PIECE_ROLES, ROLE_GROUP } from "@/lib/types";
 
 export interface PieceInput {
   file: File | null;
@@ -11,30 +12,61 @@ export interface PieceInput {
 export type OutfitInput = Record<PieceRole, PieceInput>;
 
 export const EMPTY_PIECE: PieceInput = { file: null, url: "", sample: null };
-export const EMPTY_OUTFIT: OutfitInput = {
-  top: EMPTY_PIECE,
-  bottom: EMPTY_PIECE,
-  jacket: EMPTY_PIECE,
-};
+export const EMPTY_OUTFIT: OutfitInput = Object.fromEntries(PIECE_ROLES.map((r) => [r, EMPTY_PIECE])) as OutfitInput;
 
 export function pieceFilled(p: PieceInput): boolean {
   return Boolean(p.file || p.url.trim() || p.sample);
 }
 
-const SAMPLES = [
+interface Sample {
+  id: string;
+  label: string;
+}
+const CLOTHING_SAMPLES: Sample[] = [
   { id: "olive-tee.jpg", label: "Olive tee" },
   { id: "coral-top.jpg", label: "Coral top" },
   { id: "navy-shirt.jpg", label: "Navy shirt" },
 ];
+const METAL_SAMPLES = (role: string): Sample[] => [
+  { id: `${role}-gold.jpg`, label: "Gold" },
+  { id: `${role}-silver.jpg`, label: "Silver" },
+  { id: `${role}-rose-gold.jpg`, label: "Rose gold" },
+];
+const SAMPLES: Record<PieceRole, Sample[]> = {
+  top: CLOTHING_SAMPLES,
+  bottom: CLOTHING_SAMPLES,
+  jacket: CLOTHING_SAMPLES,
+  shoes: [
+    { id: "shoes-white.jpg", label: "White" },
+    { id: "shoes-black.jpg", label: "Black" },
+    { id: "shoes-tan.jpg", label: "Tan" },
+  ],
+  necklace: METAL_SAMPLES("necklace"),
+  earrings: METAL_SAMPLES("earrings"),
+  bracelet: METAL_SAMPLES("bracelet"),
+  ring: METAL_SAMPLES("ring"),
+};
 
 const ROLE_HELP: Record<PieceRole, string> = {
   top: "Shirt, tee, blouse or knit. It sits closest to your face, so it has the biggest effect.",
-  bottom:
-    "Trousers, jeans or a skirt. Needs a photo of someone wearing it (not a flat product photo) and requires the full-body photo from step 2.",
+  bottom: "Trousers, jeans or a skirt. Needs a photo of someone wearing it, not a flat product photo.",
   jacket: "Blazer, coat or overshirt. It is layered over the top.",
+  shoes: "Trainers, boots or heels. Use a clean product photo of one shoe, at least 512 px wide.",
+  necklace: "Chain or pendant. A front-facing photo with the background removed works best.",
+  earrings: "Studs, hoops or drops. A clear, close photo of the pair on a plain background works best.",
+  bracelet: "Bangle, chain or cuff. A 3/4 front view works best.",
+  ring: "Any ring. A clear, close photo on a plain background works best.",
+};
+const ROLE_NEEDS: Partial<Record<PieceRole, string>> = {
+  bottom: "Needs the full-body photo from step 2.",
+  shoes: "Needs the full-body photo from step 2.",
+  bracelet: "Needs the hand photo from step 2.",
+  ring: "Needs the hand photo from step 2.",
 };
 
 function Slot({ role, value, onChange }: { role: PieceRole; value: PieceInput; onChange: (v: PieceInput) => void }) {
+  const samples = SAMPLES[role];
+  const clothing = ROLE_GROUP[role] === "clothing";
   const label = PIECE_LABEL[role];
   const objUrl = useObjectUrl(value.file);
   const preview = objUrl ?? (value.sample ? `/samples/${value.sample}` : null);
@@ -57,10 +89,11 @@ function Slot({ role, value, onChange }: { role: PieceRole; value: PieceInput; o
       </div>
       <p id={`slot-${role}-help`} className="muted mb-3 text-sm">
         {ROLE_HELP[role]}
+        {ROLE_NEEDS[role] && <b className="block text-[color:var(--fg)]">{ROLE_NEEDS[role]}</b>}
       </p>
 
       <div className="mb-3 grid grid-cols-3 gap-2" role="group" aria-label={`Sample ${label.toLowerCase()} garments`}>
-        {SAMPLES.map((s) => (
+        {samples.map((s) => (
           <button
             type="button"
             key={s.id}
@@ -69,7 +102,11 @@ function Slot({ role, value, onChange }: { role: PieceRole; value: PieceInput; o
             className="overflow-hidden rounded-xl border-2 text-center"
             style={{ borderColor: value.sample === s.id ? "var(--accent)" : "var(--line)" }}
           >
-            <WizardSafeImg src={`/samples/${s.id}`} alt={s.label} className="aspect-[3/4] w-full" />
+            <WizardSafeImg
+              src={`/samples/${s.id}`}
+              alt={`${s.label} ${label.toLowerCase()} sample`}
+              className={`${clothing ? "aspect-[3/4]" : "aspect-square"} w-full`}
+            />
             <span className="block py-1 text-xs">{s.label}</span>
           </button>
         ))}
@@ -123,31 +160,42 @@ function Slot({ role, value, onChange }: { role: PieceRole; value: PieceInput; o
 export default function OutfitSlots({
   value,
   onChange,
-  hasBodyPhoto,
-  onGoToBody,
+  photos,
+  onGoToStep,
 }: {
   value: OutfitInput;
   onChange: (role: PieceRole, v: PieceInput) => void;
-  hasBodyPhoto: boolean;
-  onGoToBody: () => void;
+  /** Which photos have passed their quality checks. */
+  photos: Partial<Record<SourcePhoto, boolean>>;
+  onGoToStep: (step: 1 | 2) => void;
 }) {
-  const bottomBlocked = pieceFilled(value.bottom) && !hasBodyPhoto;
+  const filled = PIECE_ROLES.filter((r) => pieceFilled(value[r]));
+  const missing = missingPhotosFor(filled, photos);
+  const groups = rolesByGroup(PIECE_ROLES);
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <p className="muted text-sm">
-        Layering order: <b className="text-[color:var(--fg)]">Top</b>, then{" "}
-        <b className="text-[color:var(--fg)]">Bottom</b>, then <b className="text-[color:var(--fg)]">Jacket</b> over the
-        top. Use one piece or any combination.
+        Pick at least one piece. Clothing is layered Top, then Bottom, then Jacket over the top; shoes and jewellery are
+        added after. Use one piece or any combination.
       </p>
-      {PIECE_ROLES.map((role) => (
-        <Slot key={role} role={role} value={value[role]} onChange={(v) => onChange(role, v)} />
+      {groups.map((g) => (
+        <section key={g.group} aria-labelledby={`wiz-group-${g.group}`} className="space-y-3">
+          <h2 id={`wiz-group-${g.group}`} className="wiz-group-h">
+            {g.label}
+          </h2>
+          {g.roles.map((role) => (
+            <Slot key={role} role={role} value={value[role]} onChange={(v) => onChange(role, v)} />
+          ))}
+        </section>
       ))}
-      {bottomBlocked && (
+      {missing.length > 0 && (
         <div role="alert" className="wf-alert">
-          A bottom needs the full-body photo from step 2.{" "}
-          <button type="button" className="underline" onClick={onGoToBody}>
-            Go back to step 2
-          </button>
+          {missingMessage(missing)}{" "}
+          {Array.from(new Set(missing.map((m) => stepForPhoto(m.photo)))).map((n) => (
+            <button key={n} type="button" className="underline" onClick={() => onGoToStep(n)}>
+              Go back to step {n}
+            </button>
+          ))}
         </div>
       )}
     </div>

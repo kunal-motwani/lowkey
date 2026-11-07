@@ -4,7 +4,12 @@ import {
   buildWaterfall,
   formatDelta,
   formatEvidence,
+  groupPieces,
   groupTips,
+  metalLabel,
+  missingMessage,
+  missingPhotosFor,
+  splitStages,
   mutedReason,
   orderRules,
   safeHex,
@@ -113,5 +118,45 @@ describe("explain-view", () => {
     expect(stepForError("No face found")).toBe(1);
     expect(stepForError("Could not fetch the product link")).toBe(3);
     expect(stepForError("boom")).toBe(4);
+  });
+
+  it("groups pieces by role group, keeping indices", () => {
+    const g = groupPieces([{ role: "ring" }, { role: "top" }, { role: "shoes" }, { role: "necklace" }]);
+    expect(g.map((x) => x.group)).toEqual(["clothing", "footwear", "jewellery"]);
+    expect(g[2].items.map((i) => [i.piece.role, i.index])).toEqual([
+      ["ring", 0],
+      ["necklace", 3],
+    ]);
+    expect(groupPieces(undefined)).toEqual([]);
+  });
+
+  it("formats metals", () => {
+    expect(metalLabel("gold")).toBe("Gold metal");
+    expect(metalLabel("rose-gold")).toBe("Rose gold metal");
+    expect(metalLabel("dark")).toBe("Dark metal");
+    expect(metalLabel(undefined)).toBe("");
+  });
+
+  it("checks required photos from ROLE_REQUIRES", () => {
+    expect(missingPhotosFor(["top", "necklace"], {})).toEqual([]);
+    expect(missingPhotosFor(["bottom", "shoes", "ring"], { body: true })).toEqual([{ role: "ring", photo: "hand" }]);
+    const m = missingPhotosFor(["bottom", "shoes", "bracelet"], {});
+    expect(m).toHaveLength(3);
+    expect(missingMessage(m)).toBe(
+      "Bottom and Shoes need the full-body photo from step 2. Bracelet needs the hand photo from step 2. Add the photo, or remove those pieces."
+    );
+    expect(missingMessage([])).toBe("");
+  });
+
+  it("splits stages into outfit and close-ups", () => {
+    const s = splitStages([
+      { label: "Top", roles: ["top"] },
+      { label: "Necklace", roles: ["necklace"], group: "closeup" },
+      { label: "+ Shoes", roles: ["top", "shoes"], group: "outfit" },
+    ]);
+    expect(s.outfit.map((x) => x.label)).toEqual(["Top", "+ Shoes"]);
+    expect(s.closeups).toHaveLength(1);
+    expect(stepForError("Bracelets need a hand photo")).toBe(2);
+    expect(stepForError("Could not read the shoes image")).toBe(3);
   });
 });

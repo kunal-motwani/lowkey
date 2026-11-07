@@ -86,4 +86,30 @@ expect(lo.navy >= 75, "navy reasonably high (>=75) on low-concern skin");
 }
 for (const p of Object.values(results))
   for (const s of Object.values(p)) expect(s >= 0 && s <= 100, `score ${s} within 0-100`);
+
+// Jewellery / shoes checks.
+{
+  const warmTone = { skin_color: "#e0b050" };
+  const coolTone = { skin_color: "#e8b4c0" };
+  const mm = profiles["low-concern lighter skin"].m;
+  const gold = scorePiece("necklace", "#c9a227", warmTone, mm);
+  const silver = scorePiece("necklace", "#c0c0c0", warmTone, mm);
+  console.log(
+    `\nJewellery: warm undertone gold ${gold.score} (${gold.metal}), silver ${silver.score} (${silver.metal})`
+  );
+  expect(gold.metal === "gold" && silver.metal === "silver", "metal heuristic labels gold and silver");
+  expect(gold.score > silver.score, "gold scores above silver on a warm undertone");
+  expect(
+    scorePiece("necklace", "#c0c0c0", coolTone, mm).score > scorePiece("necklace", "#c9a227", coolTone, mm).score,
+    "silver scores above gold on a cool undertone"
+  );
+  const shoes = scorePiece("shoes", "#1c1c1c", warmTone, mm, {
+    others: [
+      { role: "top", hex: garments.navy },
+      { role: "bottom", hex: "#e8e8e8" },
+    ],
+  });
+  expect(shoes.rules.filter((r) => !r.applicable).length >= 3, "shoes skip face-reflection rules");
+  expect(shoes.score >= 84, "neutral shoes tying top and bottom do not lose points");
+}
 process.exit(fail ? 1 : 0);

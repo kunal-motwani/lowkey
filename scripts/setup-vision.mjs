@@ -2,7 +2,7 @@
 /**
  * Self-host MediaPipe Tasks Vision assets so the browser never talks to a third-party CDN.
  *  - copies node_modules/@mediapipe/tasks-vision/wasm/*  -> public/mediapipe/wasm
- *  - downloads the BlazeFace short-range face detector and the pose landmarker (lite)
+ *  - downloads the BlazeFace short-range face detector, the pose landmarker (lite) and the hand landmarker
  *    from the official MediaPipe model storage into public/models
  * Usage: npm run setup:vision   (add --force to re-download)
  */
@@ -23,6 +23,10 @@ const MODELS = [
   {
     file: "pose_landmarker_lite.task",
     url: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+  },
+  {
+    file: "hand_landmarker.task",
+    url: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
   },
 ];
 

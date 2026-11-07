@@ -61,7 +61,7 @@ npm run dev              # http://localhost:3000
 | Variable | Purpose |
 |---|---|
 | `YOUCAM_API_KEY` | YouCam API Bearer token used for every API (shared). Never commit it |
-| `YOUCAM_KEY_SKIN` / `_TONE` / `_CLOTHES` / `_MAKEUP` | Optional per-API keys; each overrides `YOUCAM_API_KEY` for that API |
+| `YOUCAM_KEY_SKIN` / `_TONE` / `_CLOTHES` / `_MAKEUP` / `_SHOES` / `_JEWELLERY` | Optional per-API keys; each overrides `YOUCAM_API_KEY` for that API |
 | `YOUCAM_API_BASE` | API host (default `https://yce-api-01.makeupar.com`); set a regional host if your console shows one |
 | `DEMO_MODE=1` | Serve only cached results (blocks live calls when no YouCam key is set) |
 | `ANTHROPIC_API_KEY` | Optional; enables an LLM-written verdict. The app works without it |

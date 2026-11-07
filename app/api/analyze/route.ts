@@ -1,5 +1,5 @@
 import { InputError, runStylist } from "@/lib/agent";
-import { PIECE_ROLES } from "@/lib/types";
+import { PIECE_ROLES, ROLE_REQUIRES } from "@/lib/types";
 import { InvalidImageError, normalizeImage } from "@/lib/image";
 import { YoucamTaskError } from "@/lib/youcam";
 import { fetchImageSafely, UnsafeUrlError } from "@/lib/safe-fetch";
@@ -45,14 +45,18 @@ async function readFile(file: File, label: string): Promise<Buffer> {
 }
 
 /** Resolve one image from `<field>` (File), optionally `<field>Url`, or `sample<Field>`; undefined if none supplied. */
-async function load(form: FormData, field: string, opts: { url?: boolean } = {}): Promise<Buffer | undefined> {
+async function load(
+  form: FormData,
+  field: string,
+  opts: { url?: boolean; fileOnly?: boolean } = {}
+): Promise<Buffer | undefined> {
   const file = form.get(field);
   let raw: Buffer;
   if (isFile(file) && file.size > 0) {
     raw = await readFile(file, field);
   } else if (opts.url && str(form, `${field}Url`)) {
     raw = await fetchImageSafely(str(form, `${field}Url`)!);
-  } else if (str(form, `sample${cap(field)}`)) {
+  } else if (!opts.fileOnly && str(form, `sample${cap(field)}`)) {
     raw = loadSample(str(form, `sample${cap(field)}`)!);
   } else {
     return undefined;
@@ -85,15 +89,20 @@ export async function POST(req: Request) {
         const face = await load(form, "face");
         if (!face) throw new BadRequest("Missing face photo.");
         const body = await load(form, "body");
+        const hand = await load(form, "hand", { fileOnly: true });
         const loaded = await Promise.all(
           PIECE_ROLES.map(async (role) => ({ role, image: await load(form, role, { url: true }) }))
         );
         const pieces = loaded.flatMap((p) => (p.image ? [{ role: p.role, image: p.image }] : []));
-        if (!pieces.length) throw new BadRequest("Add at least one garment (top, bottom or jacket).");
-        if (pieces.some((p) => p.role === "bottom") && !body) {
-          throw new BadRequest("Add a full-body photo to try on bottoms");
+        if (!pieces.length) throw new BadRequest("Add at least one piece (clothing, shoes or jewellery).");
+        const photos = { face, body, hand };
+        const missing = new Set(pieces.map((p) => ROLE_REQUIRES[p.role]).filter((k) => k && !photos[k]));
+        if (missing.has("body"))
+          throw new BadRequest("Add a full-body photo (head to feet) to try on bottoms and shoes");
+        if (missing.has("hand")) {
+          throw new BadRequest("Add a photo of the back of your hand to try on bracelets and rings");
         }
-        const result = await runStylist({ face, body, pieces }, (e) => send("step", e));
+        const result = await runStylist({ face, body, hand, pieces }, (e) => send("step", e));
         send("result", result);
       } catch (e) {
         if (e instanceof YoucamTaskError) {

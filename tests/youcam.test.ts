@@ -5,7 +5,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { jsonResponse } from "./helpers";
 
 type YouCam = typeof import("../lib/youcam");
-const KEYS = ["YOUCAM_API_KEY", "YOUCAM_KEY_SKIN", "YOUCAM_KEY_TONE", "YOUCAM_KEY_CLOTHES", "YOUCAM_KEY_MAKEUP"];
+const KEYS = [
+  "YOUCAM_API_KEY",
+  "YOUCAM_KEY_SKIN",
+  "YOUCAM_KEY_TONE",
+  "YOUCAM_KEY_CLOTHES",
+  "YOUCAM_KEY_MAKEUP",
+  "YOUCAM_KEY_SHOES",
+  "YOUCAM_KEY_JEWELLERY",
+];
 
 let dir: string;
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -249,5 +257,127 @@ describe("cache dir override", () => {
     expect(yc.cacheGet("k")).toEqual({ a: 1 });
     expect(yc.cacheGetBin("b.jpg")?.toString()).toBe("zz");
     expect(yc.cacheGet("missing")).toBeNull();
+  });
+});
+
+describe("shoesTryOn and jewelleryTryOn", () => {
+  const mockFlow = (pollPath: string, result: object = { url: "https://result.test/r.jpg" }) => {
+    fetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/s2s/v2.0/file")) return initOk();
+      if (u === "https://upload.test/put") return new Response("", { status: 200 });
+      if (u.endsWith(pollPath + "/task-1")) return pollWith({ task_status: "success", results: result });
+      if (u.endsWith(pollPath) && init?.method === "POST") return taskOk();
+      if (u === "https://result.test/r.jpg") return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      throw new Error("unexpected " + u);
+    });
+  };
+  const postBody = (suffix: string) => {
+    const call = fetchMock.mock.calls.find(
+      (c) => String(c[0]).endsWith(suffix) && (c[1] as { method?: string }).method === "POST"
+    );
+    return JSON.parse((call![1] as { body: string }).body);
+  };
+  const authFor = (suffix: string) =>
+    (fetchMock.mock.calls.find((c) => String(c[0]).endsWith(suffix))![1] as { headers: Record<string, string> }).headers
+      .Authorization;
+
+  it("keeps endpoints in exported tables", async () => {
+    const yc = await load();
+    expect(yc.SHOES_TASK.path).toBe("shoes-transfer");
+    expect(Object.fromEntries(Object.entries(yc.JEWELLERY_TASK).map(([k, v]) => [k, v.path]))).toEqual({
+      necklace: "2d-vto/necklace",
+      earrings: "2d-vto/earring",
+      bracelet: "2d-vto/bracelet",
+      ring: "2d-vto/ring",
+    });
+  });
+
+  it("shoes: posts src_file_id + ref_file_id only, caches by both images, reports cached", async () => {
+    const yc = await load();
+    mockFlow("/task/shoes-transfer");
+    const seen: boolean[] = [];
+    const onCall = (i: { cached: boolean }) => seen.push(i.cached);
+    const img = await yc.shoesTryOn(Buffer.from("body"), Buffer.from("shoe"), { onCall });
+    expect(img).toMatch(/^data:image\/jpeg;base64,/);
+    expect(postBody("/task/shoes-transfer")).toEqual({ src_file_id: "file-1", ref_file_id: "file-1" });
+    fetchMock.mockClear();
+    await yc.shoesTryOn(Buffer.from("body"), Buffer.from("shoe"), { onCall });
+    expect(fetchMock).not.toHaveBeenCalled();
+    await yc.shoesTryOn(Buffer.from("body"), Buffer.from("other-shoe"), { onCall });
+    expect(seen).toEqual([false, true, false]);
+    expect(fs.readdirSync(dir).filter((f) => f.startsWith("shoes_")).length).toBe(2);
+  });
+
+  it("shoes: sends gender/style only when given and uses the per-API key", async () => {
+    vi.stubEnv("YOUCAM_KEY_SHOES", "shoes-specific");
+    const yc = await load();
+    mockFlow("/task/shoes-transfer");
+    await yc.shoesTryOn(Buffer.from("b2"), Buffer.from("s2"), { gender: "female", style: "random" });
+    expect(postBody("/task/shoes-transfer")).toMatchObject({ gender: "female", style: "random" });
+    expect(authFor("/s2s/v2.0/file")).toBe("Bearer shoes-specific");
+  });
+
+  it.each([
+    ["necklace", "/task/2d-vto/necklace"],
+    ["earrings", "/task/2d-vto/earring"],
+    ["bracelet", "/task/2d-vto/bracelet"],
+    ["ring", "/task/2d-vto/ring"],
+  ] as const)("%s: posts both file-id and info forms to %s and polls the same path", async (role, suffix) => {
+    vi.stubEnv("YOUCAM_KEY_JEWELLERY", "jewel-specific");
+    const yc = await load();
+    mockFlow(suffix);
+    const img = await yc.jewelleryTryOn(role, Buffer.from("person"), Buffer.from("jewel"));
+    expect(img).toMatch(/^data:image\/jpeg;base64,/);
+    expect(postBody(suffix)).toEqual({
+      src_file_id: "file-1",
+      ref_file_ids: ["file-1"],
+      source_info: { name: "file-1" },
+      object_infos: [{ name: "file-1" }],
+    });
+    expect(authFor("/s2s/v2.0/file")).toBe("Bearer jewel-specific");
+    expect(fs.readdirSync(dir).some((f) => f.startsWith(`jewellery_${role}_`))).toBe(true);
+  });
+
+  it("jewellery: optional intensities go into object_infos[].parameter with role-specific names", async () => {
+    const yc = await load();
+    mockFlow("/task/2d-vto/bracelet");
+    await yc.jewelleryTryOn("bracelet", Buffer.from("p3"), Buffer.from("j3"), {
+      shadowIntensity: 0.4,
+      ambientLightIntensity: 0.6,
+    });
+    expect(postBody("/task/2d-vto/bracelet").object_infos[0].parameter).toEqual({
+      bracelet_shadow_intensity: 0.4,
+      bracelet_ambient_light_intensity: 0.6,
+    });
+  });
+
+  it("jewellery: the role is part of the cache key", async () => {
+    const yc = await load();
+    mockFlow("/task/2d-vto/necklace");
+    await yc.jewelleryTryOn("necklace", Buffer.from("p4"), Buffer.from("j4"));
+    mockFlow("/task/2d-vto/earring");
+    const seen: boolean[] = [];
+    await yc.jewelleryTryOn("earrings", Buffer.from("p4"), Buffer.from("j4"), { onCall: (i) => seen.push(i.cached) });
+    expect(seen).toEqual([false]);
+  });
+
+  it("accepts result URLs in alternative shapes", async () => {
+    const yc = await load();
+    mockFlow("/task/2d-vto/ring", [{ download_url: "https://result.test/r.jpg" }] as never);
+    await expect(yc.jewelleryTryOn("ring", Buffer.from("p5"), Buffer.from("j5"))).resolves.toMatch(/^data:image/);
+  });
+
+  it("turns a 404 from an endpoint into a helpful failure message", async () => {
+    const yc = await load();
+    fetchMock.mockImplementation(async (url: string) => {
+      const u = String(url);
+      if (u.endsWith("/s2s/v2.0/file")) return initOk();
+      if (u === "https://upload.test/put") return new Response("", { status: 200 });
+      return jsonResponse({ status: 404, error: "NotFound" }, 404);
+    });
+    await expect(yc.jewelleryTryOn("ring", Buffer.from("p6"), Buffer.from("j6"))).rejects.toThrow(
+      /may not be enabled for your key/
+    );
   });
 });

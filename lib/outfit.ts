@@ -1,6 +1,6 @@
 import { ROLE_WEIGHT, concernSeverity, rescueMakeup, scorePiece, undertoneOf } from "./flattery";
 import type { Flattery } from "./flattery";
-import { PIECE_LABEL } from "./types";
+import { PIECE_LABEL, ROLE_GROUP } from "./types";
 import type { OutfitScore, PieceRole, PieceScore } from "./types";
 import type { SkinMetrics, ToneResult } from "./youcam";
 
@@ -8,13 +8,17 @@ export const BUY_THRESHOLD = 70;
 
 /** Order used to pick the anchor piece other pieces are paired against. */
 const ANCHOR_ORDER: PieceRole[] = ["top", "jacket", "bottom"];
+/** Output order of pieces in OutfitScore.pieces. */
+const OUTPUT_ORDER: PieceRole[] = ["top", "jacket", "bottom", "shoes", "necklace", "earrings", "bracelet", "ring"];
 
 const signed = (n: number) => `${n >= 0 ? "+" : ""}${Math.round(n)}`;
 
 /**
  * Outfit score = weighted mean of piece scores. Weights come from ROLE_WEIGHT (top 0.5, jacket 0.35,
- * bottom 0.15), normalised over the pieces actually provided so they always sum to 1.
- * The anchor (top, else jacket, else bottom) is passed as pairing context to the other pieces.
+ * bottom 0.15, shoes 0.10, necklace 0.10, earrings 0.10, bracelet 0.05, ring 0.05), normalised over the
+ * pieces actually provided so they always sum to 1.
+ * The anchor (top, else jacket, else bottom) is passed as pairing context to the other pieces; every piece also
+ * receives the other pieces' colours (used by the shoe and accent rules).
  */
 export function scoreOutfit(
   pieces: { role: PieceRole; hex: string }[],
@@ -25,14 +29,17 @@ export function scoreOutfit(
   const roles = pieces.map((p) => p.role);
   if (new Set(roles).size !== roles.length) throw new Error("scoreOutfit received the same piece role more than once.");
 
-  const anchorRole = ANCHOR_ORDER.find((r) => roles.includes(r))!;
-  const anchorHex = pieces.find((p) => p.role === anchorRole)!.hex;
+  const anchorRole = ANCHOR_ORDER.find((r) => roles.includes(r));
+  const anchorHex = anchorRole ? pieces.find((p) => p.role === anchorRole)!.hex : undefined;
   const totalWeight = pieces.reduce((s, p) => s + ROLE_WEIGHT[p.role], 0);
 
-  const scored: PieceScore[] = ANCHOR_ORDER.flatMap((role) => {
+  const scored: PieceScore[] = OUTPUT_ORDER.flatMap((role) => {
     const p = pieces.find((x) => x.role === role);
     if (!p) return [];
-    const s = scorePiece(role, p.hex, tone, metrics, role === anchorRole ? undefined : { topHex: anchorHex });
+    const s = scorePiece(role, p.hex, tone, metrics, {
+      topHex: role === anchorRole ? undefined : anchorHex,
+      others: pieces.filter((x) => x.role !== role).map((x) => ({ role: x.role, hex: x.hex })),
+    });
     return [{ ...s, weight: ROLE_WEIGHT[role] / totalWeight }];
   });
 
@@ -71,18 +78,39 @@ function buildSummary(o: OutfitScore): string[] {
       : `The ${label(dominant)} moved the score most: it scored ${dominant.score}/100 and, at a weight of ${dominant.weight.toFixed(2)}, costs the outfit about ${Math.round(pull(dominant))} points compared with a perfect piece.`
   );
 
-  const factors = o.pieces.map((p) => {
+  const clothing = o.pieces.filter((p) => ROLE_GROUP[p.role] === "clothing");
+  const extras = o.pieces.filter((p) => ROLE_GROUP[p.role] !== "clothing");
+  const factor = (p: PieceScore) => {
     const f = biggestFactor(p);
     return f ? `${label(p)}: ${f.label.toLowerCase()} (${signed(f.delta)})` : `${label(p)}: no strong rule fired`;
-  });
-  out.push(`Biggest factor per piece - ${factors.join("; ")}.`);
+  };
+  const parts: string[] = [];
+  if (clothing.length) parts.push(`Biggest factor per piece - ${clothing.map(factor).join("; ")}`);
+  // Jewellery and shoes are mentioned only when one of their rules actually moved the score.
+  const movers = extras.filter((p) => biggestFactor(p));
+  if (movers.length) {
+    const shift = movers.reduce((s, p) => s + p.weight * (p.score - p.base), 0);
+    parts.push(
+      `Shoes and jewellery shifted the outfit by about ${signed(shift)} points (${movers.map(factor).join("; ")})`
+    );
+  }
+  if (parts.length) out.push(`${parts.join(". ")}.`);
 
-  const cfPiece = [...o.pieces].filter((p) => p.counterfactuals.length).sort((a, b) => pull(b) - pull(a))[0];
+  // Best single swap by gain to the outfit score.
+  const gain = (p: PieceScore) => p.weight * (p.counterfactuals[0]?.delta ?? 0);
+  const cfPiece = [...o.pieces].filter((p) => gain(p) > 0).sort((a, b) => gain(b) - gain(a))[0];
   const cf = cfPiece?.counterfactuals[0];
-  if (cfPiece && cf && cf.delta > 0) {
+  if (cfPiece && cf) {
     const newScore = Math.round(o.pieces.reduce((s, p) => s + p.weight * (p === cfPiece ? cf.score : p.score), 0));
+    const group = ROLE_GROUP[cfPiece.role];
+    const what =
+      group === "jewellery"
+        ? `Choosing ${cf.name.toLowerCase()} metal (${cf.hex}) for the ${label(cfPiece)}`
+        : group === "footwear"
+          ? `Switching the ${label(cfPiece)} to ${cf.name.toLowerCase()} (${cf.hex})`
+          : `Swapping the ${label(cfPiece)} for a ${cf.name.toLowerCase()} (${cf.hex})`;
     out.push(
-      `Swapping the ${label(cfPiece)} for a ${cf.name.toLowerCase()} (${cf.hex}) could lift it by ${signed(cf.delta)} on that piece (${cf.why}), taking the outfit to about ${newScore}.`
+      `${what} could lift it by ${signed(cf.delta)} on that piece (${cf.why}), taking the outfit to about ${newScore}.`
     );
   } else {
     out.push(

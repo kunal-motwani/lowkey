@@ -96,3 +96,48 @@ describe("makeupTips", () => {
         }
   });
 });
+
+describe("makeupTips with jewellery", () => {
+  type P = { role: "top" | "necklace" | "earrings" | "ring"; hex: string };
+  const withJewels = (pieces: P[]) => makeupTips(scoreOutfit(pieces, warm, healthy), warm, healthy);
+  const top: P = { role: "top", hex: "#1f2f5c" };
+
+  it("echoes gold with warm lip and blush, citing the piece", () => {
+    const tips = withJewels([top, { role: "necklace", hex: "#c9a227" }]);
+    const lip = tips.find((t) => t.area === "lip")!;
+    expect(lip.tip.toLowerCase()).toMatch(/warm coral|terracotta/);
+    expect(lip.tip).toContain("gold");
+    expect(lip.why).toContain("#c9a227");
+    expect(tips.find((t) => t.area === "blush")!.tip).toMatch(/peach|apricot/);
+  });
+
+  it("pairs silver with a cooler berry lip", () => {
+    const lip = withJewels([top, { role: "ring", hex: "#c0c0c0" }]).find((t) => t.area === "lip")!;
+    expect(lip.tip).toMatch(/berry/);
+    expect(lip.tip).toContain("silver");
+  });
+
+  it("keeps eyes soft with coloured earrings and face makeup light with a bold necklace", () => {
+    const tips = withJewels([top, { role: "earrings", hex: "#c0300a" }, { role: "necklace", hex: "#2a9d8f" }]);
+    expect(tips.find((t) => t.area === "eyes")!.tip).toMatch(/does not fight your coloured earrings/);
+    expect(tips.find((t) => t.area === "blush")!.tip).toMatch(/light/);
+  });
+
+  it("stays at 4-7 tips, deterministic, no brands or medical words", () => {
+    const pieces: P[] = [top, { role: "necklace", hex: "#c9a227" }, { role: "earrings", hex: "#c0300a" }];
+    const a = withJewels(pieces);
+    expect(a).toEqual(withJewels(pieces));
+    expect(a.length).toBeGreaterThanOrEqual(4);
+    expect(a.length).toBeLessThanOrEqual(7);
+    for (const t of a) {
+      expect(`${t.tip} ${t.why}`).not.toMatch(BRANDS);
+      expect(`${t.tip} ${t.why}`).not.toMatch(MEDICAL);
+      expect(t.why.length).toBeGreaterThan(8);
+    }
+  });
+
+  it("does not mention jewellery without jewellery", () => {
+    const tips = withJewels([top]);
+    expect(JSON.stringify(tips)).not.toMatch(/jewellery|earrings|necklace/);
+  });
+});

@@ -8,6 +8,8 @@ vi.mock("../lib/youcam", () => ({
   skinTone: vi.fn(),
   clothesTryOn: vi.fn(),
   makeupTryOn: vi.fn(),
+  shoesTryOn: vi.fn(),
+  jewelleryTryOn: vi.fn(),
 }));
 vi.mock("../lib/outfit", () => ({ scoreOutfit: vi.fn(), rescueMakeupFor: vi.fn() }));
 vi.mock("../lib/makeup-tips", () => ({ makeupTips: vi.fn() }));
@@ -47,12 +49,14 @@ function outfit(score: number, pieces: PieceScore[]): OutfitScore {
 
 let n: number;
 let tryOnCalls: { person: string; category: string }[];
+let extraCalls: { fn: string; person: string }[];
 
 beforeEach(() => {
   vi.resetAllMocks();
   vi.stubEnv("ANTHROPIC_API_KEY", "");
   n = 0;
   tryOnCalls = [];
+  extraCalls = [];
   vi.mocked(yc.skinAnalysis).mockResolvedValue({});
   vi.mocked(yc.skinTone).mockResolvedValue({ skin_color: "#e8c4b0", source: "local" });
   vi.mocked(yc.clothesTryOn).mockImplementation(async (person, _garment, category, opts) => {
@@ -61,6 +65,16 @@ beforeEach(() => {
     return dataUrl(`stage-${++n}`);
   });
   vi.mocked(yc.makeupTryOn).mockResolvedValue(dataUrl("makeup"));
+  vi.mocked(yc.shoesTryOn).mockImplementation(async (person, _s, opts) => {
+    extraCalls.push({ fn: "shoes", person: decode(person) });
+    opts?.onCall?.({ api: "shoes", cached: false });
+    return dataUrl(`shoes-${++n}`);
+  });
+  vi.mocked(yc.jewelleryTryOn).mockImplementation(async (role, person, _j, opts) => {
+    extraCalls.push({ fn: role, person: decode(person) });
+    opts?.onCall?.({ api: "jewellery", cached: false });
+    return dataUrl(`${role}-${++n}`);
+  });
   vi.mocked(rescueMakeupFor).mockReturnValue(PLAN);
   vi.mocked(makeupTips).mockReturnValue([{ area: "lip", tip: "t", why: "w" }]);
   vi.mocked(scoreOutfit).mockImplementation((ps) =>
@@ -72,7 +86,7 @@ beforeEach(() => {
 });
 
 const run = async (
-  input: { body?: Buffer; roles: PieceRole[] },
+  input: { body?: Buffer; hand?: Buffer; roles: PieceRole[] },
   emit: (e: AgentEvent) => void = () => {},
   face?: Buffer
 ) =>
@@ -80,6 +94,7 @@ const run = async (
     {
       face: face ?? Buffer.from("FACE"),
       body: input.body,
+      hand: input.hand,
       pieces: await Promise.all(input.roles.map(async (role) => ({ role, image: await solid("#7d8239") }))),
     },
     emit
@@ -91,7 +106,19 @@ describe("input validation", () => {
     expect(yc.skinAnalysis).not.toHaveBeenCalled();
   });
   it("throws InputError for a bottom without a body photo", async () => {
-    await expect(run({ roles: ["top", "bottom"] })).rejects.toThrow("Add a full-body photo to try on bottoms");
+    await expect(run({ roles: ["top", "bottom"] })).rejects.toThrow(
+      "Add a full-body photo (head to feet) to try on bottoms and shoes"
+    );
+    expect(yc.skinAnalysis).not.toHaveBeenCalled();
+  });
+  it("throws InputError for shoes without a body photo", async () => {
+    await expect(run({ roles: ["top", "shoes"] })).rejects.toThrow(/full-body photo \(head to feet\)/);
+    expect(yc.skinAnalysis).not.toHaveBeenCalled();
+  });
+  it.each(["bracelet", "ring"] as const)("throws InputError for a %s without a hand photo", async (role) => {
+    await expect(run({ roles: [role] })).rejects.toThrow(
+      "Add a photo of the back of your hand to try on bracelets and rings"
+    );
     expect(yc.skinAnalysis).not.toHaveBeenCalled();
   });
 });
@@ -232,5 +259,106 @@ describe("unitsEstimate", () => {
     const r = await run({ body: Buffer.from("BODY"), roles: ["top", "jacket"] });
     // tone (live) + one live try-on; skin and the other try-on were cache hits
     expect(r.unitsEstimate).toBe(2);
+  });
+});
+
+describe("shoes and jewellery", () => {
+  const BODY = Buffer.from("BODY");
+  const HAND = Buffer.from("HAND");
+
+  it("applies shoes after the clothing on the latest full-length image", async () => {
+    const r = await run({ body: BODY, roles: ["shoes", "jacket", "top"] });
+    expect(tryOnCalls.map((c) => c.person)).toEqual(["BODY", "stage-1"]);
+    expect(extraCalls).toEqual([{ fn: "shoes", person: "stage-2" }]);
+    expect(r.stages.map((s) => s.label)).toEqual(["Top", "+ Jacket", "+ Shoes"]);
+    expect(r.stages[2].roles).toEqual(["top", "jacket", "shoes"]);
+    expect(r.stages.every((s) => s.group === "outfit")).toBe(true);
+  });
+
+  it("shoes alone go onto the body photo", async () => {
+    const r = await run({ body: BODY, roles: ["shoes"] });
+    expect(extraCalls).toEqual([{ fn: "shoes", person: "BODY" }]);
+    expect(r.stages.map((s) => s.label)).toEqual(["Shoes"]);
+  });
+
+  it("chains necklace then earrings on the plain face photo when a body photo exists", async () => {
+    const r = await run({ body: BODY, roles: ["top", "earrings", "necklace"] });
+    expect(extraCalls[0]).toEqual({ fn: "necklace", person: "FACE" });
+    expect(extraCalls[1].fn).toBe("earrings");
+    expect(extraCalls[1].person).toMatch(/^necklace-/);
+    const closeup = r.stages.filter((s) => s.group === "closeup");
+    expect(closeup.map((s) => s.label)).toEqual(["Necklace", "+ Earrings"]);
+    expect(closeup[1].roles).toEqual(["necklace", "earrings"]);
+    expect(r.photoNotes).toContain("Necklace and earrings are shown on your face photo, not on the clothed try-on");
+  });
+
+  it("builds on the chest-up try-on image when there is no body photo (no extra paid calls)", async () => {
+    const r = await run({ roles: ["top", "necklace"] });
+    expect(yc.clothesTryOn).toHaveBeenCalledTimes(1);
+    expect(extraCalls).toEqual([{ fn: "necklace", person: "stage-1" }]);
+    expect(r.stages[1].roles).toEqual(["top", "necklace"]);
+  });
+
+  it("tries bracelet and ring on the hand photo, chained", async () => {
+    const r = await run({ hand: HAND, roles: ["ring", "bracelet"] });
+    expect(extraCalls[0]).toEqual({ fn: "bracelet", person: "HAND" });
+    expect(extraCalls[1].fn).toBe("ring");
+    expect(extraCalls[1].person).toMatch(/^bracelet-/);
+    expect(r.stages.map((s) => s.label)).toEqual(["Bracelet", "+ Ring"]);
+    expect(r.stages.every((s) => s.group === "closeup")).toBe(true);
+    expect(r.photoNotes).toEqual([]);
+  });
+
+  it("a failed jewellery stage records an error and the chain continues", async () => {
+    vi.mocked(yc.jewelleryTryOn).mockReset();
+    let c = 0;
+    vi.mocked(yc.jewelleryTryOn).mockImplementation(async (role, person) => {
+      extraCalls.push({ fn: role, person: decode(person) });
+      if (++c === 1) throw new Error("not enabled");
+      return dataUrl("ok");
+    });
+    const r = await run({ body: BODY, roles: ["necklace", "earrings"] });
+    expect(r.stages[0].image).toBeUndefined();
+    expect(r.stages[1].image).toBeDefined();
+    expect(extraCalls[1].person).toBe("FACE");
+    expect(r.errors).toContain("Try-on (Necklace): not enabled");
+  });
+
+  it("a failed shoes stage does not stop the jewellery stages", async () => {
+    vi.mocked(yc.shoesTryOn).mockRejectedValue(new Error("no foot"));
+    const r = await run({ body: BODY, hand: HAND, roles: ["shoes", "ring"] });
+    expect(r.errors).toContain("Try-on (Shoes): no foot");
+    expect(r.stages.find((s) => s.label === "Ring")?.image).toBeDefined();
+  });
+
+  it("never recolours jewellery or shoes", async () => {
+    vi.mocked(scoreOutfit).mockImplementation((ps) =>
+      outfit(
+        50,
+        ps.map((p) => piece(p.role, 30))
+      )
+    );
+    const r = await run({ body: BODY, hand: HAND, roles: ["shoes", "ring", "necklace"] });
+    expect(r.outfit.pieces.map((p) => p.role)).toEqual(["shoes", "necklace", "ring"]);
+    expect(r.better).toBeUndefined();
+    expect(yc.clothesTryOn).not.toHaveBeenCalled();
+    expect(r.rescue?.plan).toEqual(PLAN);
+  });
+
+  it("counts only uncached shoes/jewellery calls in unitsEstimate", async () => {
+    vi.mocked(yc.skinAnalysis).mockImplementation(async (_i, opts) => {
+      opts?.onCall?.({ api: "skin", cached: true });
+      return {};
+    });
+    vi.mocked(yc.skinTone).mockImplementation(async (_i, opts) => {
+      opts?.onCall?.({ api: "tone", cached: true });
+      return { skin_color: "#e8c4b0", source: "local" };
+    });
+    vi.mocked(yc.shoesTryOn).mockImplementation(async (_p, _s, opts) => {
+      opts?.onCall?.({ api: "shoes", cached: true });
+      return dataUrl("s");
+    });
+    const r = await run({ body: BODY, hand: HAND, roles: ["shoes", "necklace", "ring"] });
+    expect(r.unitsEstimate).toBe(2); // two live jewellery calls
   });
 });
