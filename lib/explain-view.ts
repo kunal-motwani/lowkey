@@ -193,7 +193,13 @@ export function groupTips(tips: MakeupTip[] | undefined): TipGroup[] {
 export function stepForError(message: string): 1 | 2 | 3 | 4 {
   const m = message.toLowerCase();
   if (/full[- ]body|body photo|\bbody\b|hand photo|\bhand\b|wrist/.test(m)) return 2;
-  if (/\bface\b|selfie|close-up|\bneck\b/.test(m)) return 1;
+  // YouCam image-quality rejections (dark, bright, blurry, face too small / not found) come from the face photo.
+  if (
+    /\bface\b|selfie|close-up|\bneck\b|too dark|too bright|\blighting\b|blur|too small|no face|not detected|sharp/.test(
+      m
+    )
+  )
+    return 1;
   if (
     /garment|\btop\b|bottom|jacket|shoe|necklace|earring|bracelet|\bring\b|jewel|link|url|product|piece|image address/.test(
       m

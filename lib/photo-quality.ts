@@ -23,8 +23,15 @@ export const FACE_OFFCENTRE_Y_FAIL = 0.28;
 export const FACE_EDGE_WARN = 0.02;
 export const FACE_EDGE_FAIL = -0.01;
 
-/** Mean luma 0-255 (see lib/camera.ts lightingHint: <70 dark, >215 bright). */
-export const LUMA_FAIL_DARK = 45;
+/**
+ * Mean luma 0-255. YouCam rejects dim photos ("input image is too dark"), so we fail below 70 and warn below 100.
+ * For face photos the brightness of the central (face) region is what counts: a backlit face in front of a bright
+ * window must not pass just because the frame average is high. Measured values are shown to the user.
+ */
+export const LUMA_FAIL_DARK = 70;
+export const LUMA_WARN_DARK = 100;
+/** Face region this much darker than the whole frame reads as backlit / in shadow. */
+export const LUMA_BACKLIT_GAP = 35;
 export const LUMA_FAIL_BRIGHT = 240;
 /** Left/right half brightness difference that suggests harsh side lighting. */
 export const LUMA_UNEVEN_WARN = 60;
@@ -541,31 +548,40 @@ export function orientationCheck(w: number, h: number): QualityCheck {
     : chk("orientation", "Portrait photo", "pass", "Portrait orientation.");
 }
 
-/** `leftRightDiff` is |left half luma - right half luma|. */
-export function lightingCheck(luma: number, leftRightDiff = 0): QualityCheck {
-  const hint = lightingHint(luma);
-  if (luma < LUMA_FAIL_DARK) {
+/**
+ * `leftRightDiff` is |left half luma - right half luma|. `subjectLuma` (face mode) is the brightness of the central
+ * region where the face sits; when given it decides the dark checks.
+ */
+export function lightingCheck(luma: number, leftRightDiff = 0, subjectLuma?: number): QualityCheck {
+  const eff = subjectLuma ?? luma;
+  const measured = `Brightness ${Math.round(eff)}/255 (needs at least ${LUMA_WARN_DARK}).`;
+  const backlit = subjectLuma !== undefined && luma - subjectLuma > LUMA_BACKLIT_GAP;
+  if (eff < LUMA_FAIL_DARK) {
     return chk(
       "lighting",
       "Lighting",
       "fail",
-      "The photo is too dark.",
-      "Face a window or move to brighter, natural light."
+      backlit ? `Your face is in shadow (backlit). ${measured}` : `The photo is too dark. ${measured}`,
+      backlit
+        ? "Turn around so the window or lamp is in front of you, not behind."
+        : "Face a window or move to brighter, natural light."
     );
   }
   if (luma > LUMA_FAIL_BRIGHT) {
     return chk("lighting", "Lighting", "fail", "The photo is too bright.", "Step back from direct light or glare.");
   }
-  if (hint === "dark") {
+  if (eff < LUMA_WARN_DARK) {
     return chk(
       "lighting",
       "Lighting",
       "warn",
-      "The photo is a bit dark.",
-      "Face a window or move to brighter, natural light."
+      backlit ? `Your face is a bit shadowed. ${measured}` : `The photo is a bit dark. ${measured}`,
+      backlit
+        ? "Face the light so your face is brighter than the background."
+        : "Face a window or move to brighter, natural light."
     );
   }
-  if (hint === "bright") {
+  if (lightingHint(luma) === "bright") {
     return chk("lighting", "Lighting", "warn", "The photo is a bit bright.", "Step back from direct light or glare.");
   }
   if (leftRightDiff > LUMA_UNEVEN_WARN) {
@@ -577,7 +593,7 @@ export function lightingCheck(luma: number, leftRightDiff = 0): QualityCheck {
       "Face the light source so both sides are evenly lit."
     );
   }
-  return chk("lighting", "Lighting", "pass", "Lighting looks good.");
+  return chk("lighting", "Lighting", "pass", `Lighting looks good. Brightness ${Math.round(eff)}/255.`);
 }
 
 /** Variance of the 4-neighbour Laplacian over a grayscale image (row-major, w*h). Higher = sharper. */
@@ -637,7 +653,25 @@ export function analyzePixels(rgba: Uint8ClampedArray | Uint8Array, w: number, h
     }
   }
   const denom = Math.max(1, half * h);
-  return { gray, luma: meanLuma(rgba), leftRightDiff: Math.abs(l - r) / denom };
+  // Central region where the face sits inside the guide oval (x 25-75%, y 15-65%).
+  const x0 = Math.floor(w * 0.25);
+  const x1 = Math.ceil(w * 0.75);
+  const y0 = Math.floor(h * 0.15);
+  const y1 = Math.ceil(h * 0.65);
+  let c = 0;
+  let cn = 0;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      c += gray[y * w + x];
+      cn++;
+    }
+  }
+  return {
+    gray,
+    luma: meanLuma(rgba),
+    leftRightDiff: Math.abs(l - r) / denom,
+    centerLuma: cn ? c / cn : meanLuma(rgba),
+  };
 }
 
 /* ---------- Live guidance (pure) ---------- */
@@ -973,7 +1007,7 @@ export async function checkPhotoWith(
     }
     checks.push(...(await detectorChecks(d, r, mode)));
     const px = analyzePixels(r.small.data, r.small.width, r.small.height);
-    checks.push(lightingCheck(px.luma, px.leftRightDiff));
+    checks.push(lightingCheck(px.luma, px.leftRightDiff, mode === "face" ? px.centerLuma : undefined));
     checks.push(sharpnessCheck(sharpnessScore(px.gray, r.small.width, r.small.height)));
     checks.push(resolutionCheck(r.origW, r.origH));
     if (mode === "body") checks.push(orientationCheck(r.origW, r.origH));
@@ -1000,6 +1034,6 @@ export async function liveCheck(
   const checks: QualityCheck[] = [];
   checks.push(...(await detectorChecks(d, r, mode)));
   const px = analyzePixels(r.small.data, r.small.width, r.small.height);
-  checks.push(lightingCheck(px.luma, px.leftRightDiff));
+  checks.push(lightingCheck(px.luma, px.leftRightDiff, mode === "face" ? px.centerLuma : undefined));
   return guidanceFromChecks(checks, mode);
 }

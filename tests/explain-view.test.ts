@@ -160,3 +160,15 @@ describe("explain-view", () => {
     expect(stepForError("Could not read the shoes image")).toBe(3);
   });
 });
+
+describe("stepForError: image-quality rejections go to the face photo step", () => {
+  it.each([
+    "The input image is too dark for accurate analysis.",
+    "The input image is too bright.",
+    "The photo is blurry.",
+    "No face was detected in the source image.",
+    "The face in the input image is too small. It needs to take up more than 60% of the image width.",
+  ])("%s", (msg) => {
+    expect(stepForError(msg)).toBe(1);
+  });
+});

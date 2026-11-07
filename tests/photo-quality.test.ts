@@ -167,11 +167,21 @@ describe("resolution and lighting", () => {
 
   it("grades lighting", () => {
     expect(lightingCheck(30).status).toBe("fail");
-    expect(lightingCheck(60).status).toBe("warn");
+    expect(lightingCheck(69).status).toBe("fail");
+    expect(lightingCheck(85).status).toBe("warn");
+    expect(lightingCheck(100).status).toBe("pass");
     expect(lightingCheck(250).status).toBe("fail");
     expect(lightingCheck(230).status).toBe("warn");
     expect(lightingCheck(130, 90).status).toBe("warn");
     expect(lightingCheck(130, 5).status).toBe("pass");
+    // face mode: a backlit face (bright frame, dark face) fails even though the frame average is high
+    const backlit = lightingCheck(150, 5, 55);
+    expect(backlit.status).toBe("fail");
+    expect(backlit.message).toMatch(/shadow|backlit/i);
+    expect(lightingCheck(150, 5, 90).status).toBe("warn");
+    expect(lightingCheck(150, 5, 140).status).toBe("pass");
+    // measured brightness is shown to the user
+    expect(lightingCheck(60).message).toMatch(/Brightness 60\/255/);
   });
 
   it("measures left/right brightness difference", () => {
