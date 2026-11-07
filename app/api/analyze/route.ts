@@ -1,5 +1,6 @@
 import { runStylist } from "@/lib/agent";
 import { InvalidImageError, normalizeImage } from "@/lib/image";
+import { YoucamTaskError } from "@/lib/youcam";
 import { fetchImageSafely, UnsafeUrlError } from "@/lib/safe-fetch";
 import fs from "fs";
 import path from "path";
@@ -72,7 +73,9 @@ export async function POST(req: Request) {
         const result = await runStylist(selfie, garment, (e) => send("step", e));
         send("result", result);
       } catch (e) {
-        if (e instanceof BadRequest || e instanceof UnsafeUrlError || e instanceof InvalidImageError) {
+        if (e instanceof YoucamTaskError) {
+          send("fail", { message: e.detail });
+        } else if (e instanceof BadRequest || e instanceof UnsafeUrlError || e instanceof InvalidImageError) {
           send("fail", { message: e.message });
         } else {
           console.error("[analyze] unexpected error:", e instanceof Error ? e.message : e);

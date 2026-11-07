@@ -5,6 +5,8 @@ All notable changes to this project are documented here. Format based on [Keep a
 ## [Unreleased]
 
 ### Added
+- Product page links: pasting a retailer product URL now extracts the product image (og:image, Twitter card, JSON-LD) and fetches it, with the same SSRF checks on every candidate. Some shops (e.g. Amazon) block automated requests; the app then asks for an image address or an upload.
+- YouCam errors that the user can fix (e.g. "face too small", "no face detected") are shown as-is instead of a generic message; the camera now captures a 3:4 portrait crop with a larger face guide.
 - Open-source documentation: CONTRIBUTING, SECURITY, CODE_OF_CONDUCT, architecture, scoring and API docs, issue and PR templates, `.editorconfig`.
 - Local skin-tone estimate (`lib/tone-local.ts`) used and labelled "local estimate" when Skin Tone Analysis is not available for the key.
 - Per-API key overrides (`YOUCAM_KEY_SKIN`, `_TONE`, `_CLOTHES`, `_MAKEUP`).

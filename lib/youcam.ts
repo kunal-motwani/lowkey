@@ -78,6 +78,17 @@ interface TaskPollResponse {
   data?: TaskData;
 }
 
+/** A task the YouCam API rejected for a reason the user can act on (e.g. face too small / not detected). */
+export class YoucamTaskError extends Error {
+  constructor(
+    kind: string,
+    readonly detail: string
+  ) {
+    super(`${kind} task failed: ${detail}`);
+    this.name = "YoucamTaskError";
+  }
+}
+
 const mem = new Map<string, unknown>();
 
 /** Per-API keys (YOUCAM_KEY_SKIN etc.) with a single YOUCAM_API_KEY as fallback. */
@@ -149,7 +160,7 @@ export async function pollTask(kind: string, id: string, timeoutMs = 90_000): Pr
     const st = r.data?.task_status;
     if (st === "success") return r.data as TaskData;
     if (st === "error" || st === "failed")
-      throw new Error(`${kind} task failed: ${r.data?.error_message || r.data?.error || "unknown"}`);
+      throw new YoucamTaskError(kind, r.data?.error_message || r.data?.error || "unknown");
     await new Promise((s) => setTimeout(s, wait));
     wait = Math.min(wait * 1.3, 5000);
   }

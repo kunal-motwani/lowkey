@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("@/lib/agent", () => ({ runStylist: vi.fn() }));
 
 import { runStylist } from "@/lib/agent";
+import { YoucamTaskError } from "@/lib/youcam";
 import { POST } from "../app/api/analyze/route";
 
 let n = 0;
@@ -84,5 +85,14 @@ describe("POST /api/analyze", () => {
     expect(events[0].event).toBe("fail");
     expect(events[0].data.message).not.toContain("secret");
     spy.mockRestore();
+  });
+
+  it("passes YouCam user-actionable errors (e.g. face too small) through to the user", async () => {
+    vi.mocked(runStylist).mockRejectedValue(
+      new YoucamTaskError("skin-analysis", "The face in the input image is too small.")
+    );
+    const events = await sse(await POST(req({ sampleSelfie: "olive-tee.jpg", sampleGarment: "navy-shirt.jpg" })));
+    expect(events[0].event).toBe("fail");
+    expect(events[0].data.message).toBe("The face in the input image is too small.");
   });
 });

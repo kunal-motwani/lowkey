@@ -1,5 +1,6 @@
 import dns from "dns/promises";
 import net from "net";
+import { extractImageCandidates } from "./product-image";
 
 export class UnsafeUrlError extends Error {}
 
@@ -57,19 +58,31 @@ async function assertPublicHttpUrl(raw: string): Promise<URL> {
   return u;
 }
 
+interface Fetched {
+  buf: Buffer;
+  type: string;
+  url: string;
+}
+
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const MAX_HTML_BYTES = 2 * 1024 * 1024;
+const NOT_AN_IMAGE =
+  "That link is not an image, and no product image could be read from the page (some shops block automated access). " +
+  "Open the product photo, copy its image address (right-click, Copy image address) or save the photo and upload it.";
+
 /**
- * Fetch a remote image safely: public hosts only (re-checked on every redirect), size and time capped,
- * image content types only. Note: a DNS-rebinding race between check and connect remains theoretically
- * possible; for stricter isolation run behind an egress proxy.
+ * One safe GET: public hosts only (re-checked on every redirect), time capped, content-type gated.
+ * Images are capped at 8 MB (error); HTML pages are read up to 2 MB (truncated, since metadata lives in <head>).
  */
-export async function fetchImageSafely(raw: string): Promise<Buffer> {
+async function fetchSafe(raw: string, accept: string, allowHtml: boolean): Promise<Fetched> {
   let url = raw;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     const u = await assertPublicHttpUrl(url);
     const res = await fetch(u, {
       redirect: "manual",
       signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: { Accept: "image/*" },
+      headers: { Accept: accept, "User-Agent": BROWSER_UA, "Accept-Language": "en-IN,en;q=0.9" },
     });
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get("location");
@@ -78,10 +91,13 @@ export async function fetchImageSafely(raw: string): Promise<Buffer> {
       continue;
     }
     if (!res.ok) throw new UnsafeUrlError(`Image URL returned ${res.status}`);
-    const type = res.headers.get("content-type") ?? "";
-    if (!type.startsWith("image/")) throw new UnsafeUrlError("URL is not an image");
+    const type = (res.headers.get("content-type") ?? "").toLowerCase();
+    const isImage = type.startsWith("image/");
+    const isHtml = type.startsWith("text/html") || type.startsWith("application/xhtml");
+    if (!isImage && !(allowHtml && isHtml)) throw new UnsafeUrlError(allowHtml ? NOT_AN_IMAGE : "URL is not an image");
+    const cap = isImage ? MAX_BYTES : MAX_HTML_BYTES;
     const declared = Number(res.headers.get("content-length") ?? 0);
-    if (declared > MAX_BYTES) throw new UnsafeUrlError("Image is too large (max 8 MB)");
+    if (isImage && declared > cap) throw new UnsafeUrlError("Image is too large (max 8 MB)");
     const reader = res.body?.getReader();
     if (!reader) throw new UnsafeUrlError("Empty response");
     const chunks: Uint8Array[] = [];
@@ -90,13 +106,35 @@ export async function fetchImageSafely(raw: string): Promise<Buffer> {
       const { value, done } = await reader.read();
       if (done) break;
       total += value.length;
-      if (total > MAX_BYTES) {
+      if (total > cap) {
         await reader.cancel();
-        throw new UnsafeUrlError("Image is too large (max 8 MB)");
+        if (isImage) throw new UnsafeUrlError("Image is too large (max 8 MB)");
+        break;
       }
       chunks.push(value);
     }
-    return Buffer.concat(chunks);
+    return { buf: Buffer.concat(chunks), type, url: u.toString() };
   }
   throw new UnsafeUrlError("Too many redirects");
+}
+
+/**
+ * Fetch an image from a URL. Accepts a direct image URL, or a product page URL from which the product image
+ * (og:image, Twitter card, JSON-LD) is extracted and then fetched. Every hop and every candidate image URL is
+ * checked against private/loopback/metadata ranges. Note: a DNS-rebinding race between check and connect remains
+ * theoretically possible; for stricter isolation run behind an egress proxy.
+ */
+export async function fetchImageSafely(raw: string): Promise<Buffer> {
+  const first = await fetchSafe(raw, "image/*,text/html;q=0.9", true);
+  if (first.type.startsWith("image/")) return first.buf;
+
+  const candidates = extractImageCandidates(first.buf.toString("utf8"), first.url);
+  for (const c of candidates) {
+    try {
+      return (await fetchSafe(c, "image/*", false)).buf;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  throw new UnsafeUrlError(NOT_AN_IMAGE);
 }

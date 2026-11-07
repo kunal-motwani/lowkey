@@ -270,7 +270,10 @@ export default function Home() {
 
           <div className="card">
             <h2 className="font-bold">2. The garment</h2>
-            <p className="muted mb-3 text-sm">Pick a sample, upload a product image, or paste its URL.</p>
+            <p className="muted mb-3 text-sm">
+              Pick a sample, upload a product photo, or paste a product link (image links work best; some shops block
+              page links).
+            </p>
             <div className="mb-3 grid grid-cols-3 gap-3" role="group" aria-label="Sample garments">
               {SAMPLES.map((s) => (
                 <button
@@ -312,7 +315,7 @@ export default function Home() {
                   inputMode="url"
                   value={garmentUrl}
                   className="input w-full"
-                  placeholder="or paste product image URL"
+                  placeholder="or paste product page or image link"
                   onChange={(e) => {
                     setGarmentUrl(e.target.value);
                     setSample(null);

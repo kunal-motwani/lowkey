@@ -95,12 +95,18 @@ export default function CameraCapture({ onCapture, onClose, acceptLabel = "Use t
   const snap = useCallback(() => {
     const v = videoRef.current;
     if (!v || v.videoWidth === 0) return;
-    const scale = Math.min(1, MAX_SIDE / Math.max(v.videoWidth, v.videoHeight));
+    // Centre-crop to a 3:4 portrait frame so the face fills a large share of the image width
+    // (YouCam requires the face to be wider than 60% of the image). The preview uses the same crop.
+    const sw = Math.min(v.videoWidth, v.videoHeight * 0.75);
+    const sh = sw / 0.75;
+    const sx = (v.videoWidth - sw) / 2;
+    const sy = (v.videoHeight - sh) / 2;
+    const scale = Math.min(1, MAX_SIDE / sh);
     const canvas = document.createElement("canvas");
-    canvas.width = Math.round(v.videoWidth * scale);
-    canvas.height = Math.round(v.videoHeight * scale);
+    canvas.width = Math.round(sw * scale);
+    canvas.height = Math.round(sh * scale);
     // Preview is mirrored for natural framing; the captured image is NOT mirrored.
-    canvas.getContext("2d")?.drawImage(v, 0, 0, canvas.width, canvas.height);
+    canvas.getContext("2d")?.drawImage(v, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
     canvas.toBlob(
       (blob) => {
         if (!blob) {
@@ -160,7 +166,7 @@ export default function CameraCapture({ onCapture, onClose, acceptLabel = "Use t
           </button>
         </div>
 
-        <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl bg-black">
+        <div className="relative mx-auto aspect-[3/4] h-[min(60vh,34rem)] overflow-hidden rounded-2xl bg-black">
           <video
             ref={videoRef}
             muted
@@ -173,12 +179,12 @@ export default function CameraCapture({ onCapture, onClose, acceptLabel = "Use t
             <img src={shot.url} alt="Captured selfie" className="h-full w-full -scale-x-100 object-cover" />
           )}
           {live && (
-            <svg viewBox="0 0 100 75" className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
+            <svg viewBox="0 0 75 100" className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden="true">
               <ellipse
-                cx="50"
-                cy="36"
-                rx="19"
-                ry="25"
+                cx="37.5"
+                cy="42"
+                rx="26"
+                ry="34"
                 fill="none"
                 stroke="white"
                 strokeOpacity=".85"
@@ -209,7 +215,7 @@ export default function CameraCapture({ onCapture, onClose, acceptLabel = "Use t
 
         <p className="muted min-h-5 text-sm" role="status" aria-live="polite">
           {live && LIGHTING_MESSAGE[light]}
-          {live && light === "ok" && " Centre your face in the oval."}
+          {live && light === "ok" && " Move close and fill the oval with your face."}
           {phase === "review" && "Happy with it? Your photo is only used for this analysis."}
         </p>
 
