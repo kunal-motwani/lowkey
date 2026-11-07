@@ -1,4 +1,5 @@
-import { runStylist } from "@/lib/agent";
+import { InputError, runStylist } from "@/lib/agent";
+import { PIECE_ROLES } from "@/lib/types";
 import { InvalidImageError, normalizeImage } from "@/lib/image";
 import { YoucamTaskError } from "@/lib/youcam";
 import { fetchImageSafely, UnsafeUrlError } from "@/lib/safe-fetch";
@@ -24,25 +25,37 @@ function rateLimited(ip: string, limit = 6, windowMs = 60_000) {
   return recent.length > limit;
 }
 
-async function load(form: FormData, field: "selfie" | "garment"): Promise<Buffer> {
-  const sampleKey = field === "selfie" ? "sampleSelfie" : "sampleGarment";
+const isFile = (v: FormDataEntryValue | null): v is File => !!v && typeof v !== "string";
+const str = (form: FormData, key: string) => {
+  const v = form.get(key);
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+};
+const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+function loadSample(sample: string): Buffer {
+  if (!SAMPLE_RE.test(sample)) throw new BadRequest(`Sample image "${sample}" is not valid.`);
+  const samplePath = path.join(process.cwd(), "public", "samples", path.basename(sample));
+  if (!fs.existsSync(samplePath)) throw new BadRequest(`Sample image "${sample}" is not available.`);
+  return fs.readFileSync(samplePath);
+}
+
+async function readFile(file: File, label: string): Promise<Buffer> {
+  if (file.size > MAX_UPLOAD) throw new BadRequest(`The ${label} image is too large (max 8 MB).`);
+  return Buffer.from(await file.arrayBuffer());
+}
+
+/** Resolve one image from `<field>` (File), optionally `<field>Url`, or `sample<Field>`; undefined if none supplied. */
+async function load(form: FormData, field: string, opts: { url?: boolean } = {}): Promise<Buffer | undefined> {
   const file = form.get(field);
   let raw: Buffer;
-  if (file && typeof file !== "string") {
-    if (file.size > MAX_UPLOAD) throw new BadRequest(`The ${field} image is too large (max 8 MB).`);
-    raw = Buffer.from(await file.arrayBuffer());
-  } else if (
-    field === "garment" &&
-    typeof form.get("garmentUrl") === "string" &&
-    String(form.get("garmentUrl")).trim()
-  ) {
-    raw = await fetchImageSafely(String(form.get("garmentUrl")).trim());
+  if (isFile(file) && file.size > 0) {
+    raw = await readFile(file, field);
+  } else if (opts.url && str(form, `${field}Url`)) {
+    raw = await fetchImageSafely(str(form, `${field}Url`)!);
+  } else if (str(form, `sample${cap(field)}`)) {
+    raw = loadSample(str(form, `sample${cap(field)}`)!);
   } else {
-    const sample = form.get(sampleKey);
-    if (typeof sample !== "string" || !SAMPLE_RE.test(sample)) throw new BadRequest(`Missing ${field} image.`);
-    const samplePath = path.join(process.cwd(), "public", "samples", path.basename(sample));
-    if (!fs.existsSync(samplePath)) throw new BadRequest(`Sample image "${sample}" is not available.`);
-    raw = fs.readFileSync(samplePath);
+    return undefined;
   }
   return normalizeImage(raw);
 }
@@ -69,13 +82,28 @@ export async function POST(req: Request) {
       const send = (event: string, data: unknown) =>
         ctrl.enqueue(enc.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
       try {
-        const [selfie, garment] = await Promise.all([load(form, "selfie"), load(form, "garment")]);
-        const result = await runStylist(selfie, garment, (e) => send("step", e));
+        const face = await load(form, "face");
+        if (!face) throw new BadRequest("Missing face photo.");
+        const body = await load(form, "body");
+        const loaded = await Promise.all(
+          PIECE_ROLES.map(async (role) => ({ role, image: await load(form, role, { url: true }) }))
+        );
+        const pieces = loaded.flatMap((p) => (p.image ? [{ role: p.role, image: p.image }] : []));
+        if (!pieces.length) throw new BadRequest("Add at least one garment (top, bottom or jacket).");
+        if (pieces.some((p) => p.role === "bottom") && !body) {
+          throw new BadRequest("Add a full-body photo to try on bottoms");
+        }
+        const result = await runStylist({ face, body, pieces }, (e) => send("step", e));
         send("result", result);
       } catch (e) {
         if (e instanceof YoucamTaskError) {
           send("fail", { message: e.detail });
-        } else if (e instanceof BadRequest || e instanceof UnsafeUrlError || e instanceof InvalidImageError) {
+        } else if (
+          e instanceof BadRequest ||
+          e instanceof InputError ||
+          e instanceof UnsafeUrlError ||
+          e instanceof InvalidImageError
+        ) {
           send("fail", { message: e.message });
         } else {
           console.error("[analyze] unexpected error:", e instanceof Error ? e.message : e);

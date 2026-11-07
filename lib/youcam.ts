@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { localSkinTone } from "./tone-local";
+import type { PieceRole } from "./types";
 
 /**
  * Typed YouCam API client: upload -> create task -> poll, with a disk cache
@@ -167,18 +168,33 @@ export async function pollTask(kind: string, id: string, timeoutMs = 90_000): Pr
   throw new Error(`${kind} task timed out`);
 }
 
+/** Reported once per high-level call so callers can tell cache hits (free) from live API calls (cost units). */
+export interface CallInfo {
+  api: "skin" | "tone" | "vto" | "makeup";
+  cached: boolean;
+}
+export interface CallOpts {
+  onCall?: (info: CallInfo) => void;
+}
+
 /** Cached run: key = kind + input hash. */
-async function cached<T>(kind: string, inputHash: string, run: () => Promise<T>): Promise<T> {
+async function cached<T>(kind: string, inputHash: string, run: () => Promise<T>, opts?: CallOpts): Promise<T> {
   const key = `${kind}_${inputHash}`;
+  const api = kind as CallInfo["api"];
   const m = mem.get(key) as T | undefined;
-  if (m) return m;
+  if (m) {
+    opts?.onCall?.({ api, cached: true });
+    return m;
+  }
   const d = cacheGet<T>(key);
   if (d) {
     mem.set(key, d);
+    opts?.onCall?.({ api, cached: true });
     return d;
   }
   if (process.env.DEMO_MODE === "1" && !hasYoucamKey()) throw new Error(`DEMO_MODE: no cached result for ${key}`);
   const v = await run();
+  opts?.onCall?.({ api, cached: false });
   mem.set(key, v);
   cachePut(key, v);
   return v;
@@ -189,21 +205,26 @@ export type SkinMetrics = Record<string, number>; // ui_score 1-100; ASSUMED hig
 export const SKIN_ACTIONS = ["dark_circle_v2", "redness", "oiliness", "texture", "age_spot", "moisture", "radiance"];
 
 /** AI Skin Analysis. ui_score is 1-100 where higher = healthier for most categories. */
-export function skinAnalysis(img: Buffer) {
-  return cached<SkinMetrics>("skin", sha(img), async () => {
-    const id = await uploadFile(img, "skin-analysis");
-    const t = await createTask("skin-analysis", {
-      src_file_id: id,
-      dst_actions: SKIN_ACTIONS,
-      miniserver_args: { enable_mask_overlay: false },
-      format: "json",
-    });
-    const d = await pollTask("skin-analysis", t);
-    const out: SkinMetrics = {};
-    const res = Array.isArray(d.results) ? undefined : d.results;
-    for (const o of res?.output ?? []) out[o.type] = o.ui_score;
-    return out;
-  });
+export function skinAnalysis(img: Buffer, opts?: CallOpts) {
+  return cached<SkinMetrics>(
+    "skin",
+    sha(img),
+    async () => {
+      const id = await uploadFile(img, "skin-analysis");
+      const t = await createTask("skin-analysis", {
+        src_file_id: id,
+        dst_actions: SKIN_ACTIONS,
+        miniserver_args: { enable_mask_overlay: false },
+        format: "json",
+      });
+      const d = await pollTask("skin-analysis", t);
+      const out: SkinMetrics = {};
+      const res = Array.isArray(d.results) ? undefined : d.results;
+      for (const o of res?.output ?? []) out[o.type] = o.ui_score;
+      return out;
+    },
+    opts
+  );
 }
 
 export interface ToneResult {
@@ -217,35 +238,61 @@ export interface ToneResult {
 }
 
 /** AI Skin Tone Analysis (Facial Color Tones). Falls back to a local estimate if no key / the call fails. */
-export function skinTone(img: Buffer) {
-  return cached<ToneResult>("tone", sha(img), async () => {
-    const toneKey = process.env.YOUCAM_KEY_TONE || process.env.YOUCAM_API_KEY;
-    if (toneKey) {
-      try {
-        const id = await uploadFile(img, "skin-tone-analysis");
-        const t = await createTask("skin-tone-analysis", { src_file_id: id });
-        const d = await pollTask("skin-tone-analysis", t);
-        const res = Array.isArray(d.results) ? undefined : d.results;
-        return { ...(res?.color as ToneResult), source: "youcam" as const };
-      } catch {
-        /* fall through to local estimate */
+export function skinTone(img: Buffer, opts?: CallOpts) {
+  return cached<ToneResult>(
+    "tone",
+    sha(img),
+    async () => {
+      const toneKey = process.env.YOUCAM_KEY_TONE || process.env.YOUCAM_API_KEY;
+      if (toneKey) {
+        try {
+          const id = await uploadFile(img, "skin-tone-analysis");
+          const t = await createTask("skin-tone-analysis", { src_file_id: id });
+          const d = await pollTask("skin-tone-analysis", t);
+          const res = Array.isArray(d.results) ? undefined : d.results;
+          return { ...(res?.color as ToneResult), source: "youcam" as const };
+        } catch {
+          /* fall through to local estimate */
+        }
       }
-    }
-    return { ...(await localSkinTone(img)), source: "local" as const };
-  });
+      return { ...(await localSkinTone(img)), source: "local" as const };
+    },
+    opts
+  );
 }
 
 export type GarmentCategory = "upper_body" | "lower_body" | "full_body" | "shoes";
 
-/** AI Clothes Virtual Try-On. Returns result image bytes (cached) since result URLs expire. */
-export function clothesTryOn(person: Buffer, garment: Buffer, category: GarmentCategory = "upper_body") {
+/**
+ * The single place to change the garment_category sent to YouCam for each outfit role.
+ * NOTE: the YouCam docs do not enumerate the allowed values; these are UNVERIFIED until a real run.
+ * Per the docs, bottoms need a worn-outfit reference photo and a full-body person photo.
+ */
+export const GARMENT_CATEGORY: Record<PieceRole, GarmentCategory> = {
+  top: "upper_body",
+  bottom: "lower_body",
+  jacket: "upper_body",
+};
+
+/** AI Clothes Virtual Try-On. Returns result image bytes (cached) since result URLs expire. The cache key includes the category. */
+export function clothesTryOn(
+  person: Buffer,
+  garment: Buffer,
+  category: GarmentCategory = "upper_body",
+  opts?: CallOpts
+) {
   const h = sha(person) + "_" + sha(garment) + "_" + category;
-  return cachedImage("vto", h, async () => {
-    const [s, g] = await Promise.all([uploadFile(person, "cloth-v4"), uploadFile(garment, "cloth-v4")]);
-    const t = await createTask("cloth-v4", { src_file_id: s, ref_file_id: g, garment_category: category });
-    const d = await pollTask("cloth-v4", t, 120_000);
-    return resultUrl(d);
-  });
+  return cachedImage(
+    "vto",
+    h,
+    async () => {
+      const [s, g] = await Promise.all([uploadFile(person, "cloth-v4"), uploadFile(garment, "cloth-v4")]);
+      const t = await createTask("cloth-v4", { src_file_id: s, ref_file_id: g, garment_category: category });
+      const d = await pollTask("cloth-v4", t, 120_000);
+      return resultUrl(d);
+    },
+    opts
+  );
 }
 
 export interface MakeupPlan {
@@ -255,35 +302,40 @@ export interface MakeupPlan {
 }
 
 /** AI Makeup Virtual Try-On: lip + blush + concealer on an image. */
-export function makeupTryOn(face: Buffer, plan: MakeupPlan) {
+export function makeupTryOn(face: Buffer, plan: MakeupPlan, opts?: CallOpts) {
   const h = sha(face) + "_" + sha(JSON.stringify(plan));
-  return cachedImage("makeup", h, async () => {
-    // makeup-vto takes src_file_url; a File-API upload is accepted via file id too in v2.0
-    const id = await uploadFile(face, "makeup-vto");
-    const t = await createTask("makeup-vto", {
-      src_file_id: id,
-      version: "1.0",
-      effects: [
-        {
-          category: "lip_color",
-          shape: { name: "original" },
-          style: { type: "full" },
-          palettes: [{ color: plan.lip, texture: "matte", colorIntensity: 55 }],
-        },
-        {
-          category: "blush",
-          pattern: { name: "1colors1" },
-          palettes: [{ color: plan.blush, texture: "matte", colorIntensity: 45 }],
-        },
-        {
-          category: "concealer",
-          palettes: [{ color: plan.concealer, colorIntensity: 60, colorUnderEyeIntensity: 70, coverageLevel: 60 }],
-        },
-      ],
-    });
-    const d = await pollTask("makeup-vto", t, 120_000);
-    return resultUrl(d);
-  });
+  return cachedImage(
+    "makeup",
+    h,
+    async () => {
+      // makeup-vto takes src_file_url; a File-API upload is accepted via file id too in v2.0
+      const id = await uploadFile(face, "makeup-vto");
+      const t = await createTask("makeup-vto", {
+        src_file_id: id,
+        version: "1.0",
+        effects: [
+          {
+            category: "lip_color",
+            shape: { name: "original" },
+            style: { type: "full" },
+            palettes: [{ color: plan.lip, texture: "matte", colorIntensity: 55 }],
+          },
+          {
+            category: "blush",
+            pattern: { name: "1colors1" },
+            palettes: [{ color: plan.blush, texture: "matte", colorIntensity: 45 }],
+          },
+          {
+            category: "concealer",
+            palettes: [{ color: plan.concealer, colorIntensity: 60, colorUnderEyeIntensity: 70, coverageLevel: 60 }],
+          },
+        ],
+      });
+      const d = await pollTask("makeup-vto", t, 120_000);
+      return resultUrl(d);
+    },
+    opts
+  );
 }
 
 /** Result image URL: `results.url` or the first array entry's `download_url`. */
@@ -295,14 +347,24 @@ function resultUrl(d: TaskData): string {
 }
 
 /** Cache result images as bytes under a content key; returns data URL. */
-async function cachedImage(kind: string, inputHash: string, run: () => Promise<string>): Promise<string> {
+async function cachedImage(
+  kind: string,
+  inputHash: string,
+  run: () => Promise<string>,
+  opts?: CallOpts
+): Promise<string> {
   const key = `${kind}_${inputHash}.jpg`;
+  const api = kind as CallInfo["api"];
   const hit = cacheGetBin(key);
-  if (hit) return "data:image/jpeg;base64," + hit.toString("base64");
+  if (hit) {
+    opts?.onCall?.({ api, cached: true });
+    return "data:image/jpeg;base64," + hit.toString("base64");
+  }
   if (process.env.DEMO_MODE === "1" && !hasYoucamKey()) throw new Error(`DEMO_MODE: no cached result for ${key}`);
   const url = await run();
   const r = await fetch(url);
   const b = Buffer.from(await r.arrayBuffer());
   cachePutBin(key, b);
+  opts?.onCall?.({ api, cached: false });
   return "data:image/jpeg;base64," + b.toString("base64");
 }

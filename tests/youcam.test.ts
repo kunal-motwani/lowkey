@@ -194,6 +194,52 @@ describe("skinTone", () => {
   });
 });
 
+describe("clothesTryOn", () => {
+  const runTryOn = (yc: YouCam, category: "upper_body" | "lower_body", onCall: (i: { cached: boolean }) => void) => {
+    fetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      const u = String(url);
+      if (u.endsWith("/s2s/v2.0/file")) return initOk();
+      if (u === "https://upload.test/put") return new Response("", { status: 200 });
+      if (u.includes("/task/cloth-v4/task-1"))
+        return pollWith({ task_status: "success", results: { url: "https://result.test/r.jpg" } });
+      if (u.includes("/task/cloth-v4") && init?.method === "POST") return taskOk();
+      if (u === "https://result.test/r.jpg") return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      throw new Error("unexpected " + u);
+    });
+    return yc.clothesTryOn(Buffer.from("person"), Buffer.from("garment"), category, { onCall });
+  };
+  const taskBody = () => {
+    const call = fetchMock.mock.calls.find((c) => String(c[0]).endsWith("/task/cloth-v4"));
+    return JSON.parse((call![1] as { body: string }).body);
+  };
+
+  it("maps roles to categories in one place", async () => {
+    const yc = await load();
+    expect(yc.GARMENT_CATEGORY).toEqual({ top: "upper_body", bottom: "lower_body", jacket: "upper_body" });
+  });
+
+  it("sends the category in the request and keys the cache on it", async () => {
+    const yc = await load();
+    const seen: boolean[] = [];
+    const onCall = (i: { cached: boolean }) => seen.push(i.cached);
+    const first = await runTryOn(yc, "upper_body", onCall);
+    expect(first).toMatch(/^data:image\/jpeg;base64,/);
+    expect(taskBody().garment_category).toBe("upper_body");
+    expect(fs.readdirSync(dir).some((f) => f.startsWith("vto_") && f.endsWith("_upper_body.jpg"))).toBe(true);
+
+    // same inputs: cache hit, reported as cached, no fetch
+    fetchMock.mockClear();
+    await runTryOn(yc, "upper_body", onCall);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // different category: separate cache entry, live call with the new category
+    await runTryOn(yc, "lower_body", onCall);
+    expect(taskBody().garment_category).toBe("lower_body");
+    expect(seen).toEqual([false, true, false]);
+    expect(fs.readdirSync(dir).filter((f) => f.startsWith("vto_")).length).toBe(2);
+  });
+});
+
 describe("cache dir override", () => {
   it("writes into FLATTR_CACHE_DIR", async () => {
     const yc = await load();

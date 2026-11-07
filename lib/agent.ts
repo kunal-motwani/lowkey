@@ -1,132 +1,238 @@
 import { dominantColor, recolorGarment } from "./color";
-import { bestColorways, rescueMakeup, scoreGarment, type Flattery } from "./flattery";
-import { clothesTryOn, makeupTryOn, skinAnalysis, skinTone, type SkinMetrics, type ToneResult } from "./youcam";
+import { rescueMakeupFor, scoreOutfit } from "./outfit";
+import { makeupTips } from "./makeup-tips";
+import type { AgentEvent, StepId } from "./steps";
+import {
+  PIECE_LABEL,
+  type AnalysisResult,
+  type OutfitScore,
+  type PieceRole,
+  type PieceScore,
+  type TryOnStage,
+} from "./types";
+import {
+  clothesTryOn,
+  GARMENT_CATEGORY,
+  makeupTryOn,
+  skinAnalysis,
+  skinTone,
+  type CallInfo,
+  type CallOpts,
+} from "./youcam";
 
-export type StepId = "perceive" | "garment" | "score" | "decide" | "recolor" | "rescue" | "explain";
-export interface AgentEvent {
-  step: StepId;
-  status: "running" | "done" | "error" | "skipped";
-  api?: string;
-  detail?: string;
+export type { AgentEvent, StepId } from "./steps";
+
+/** A problem with what the user supplied; the message is safe to show to them. */
+export class InputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InputError";
+  }
 }
-export interface Result {
-  garmentHex: string;
-  metrics: SkinMetrics;
-  tone: ToneResult;
-  flattery: Flattery;
-  verdict: "buy" | "fix";
-  originalTryOn?: string;
-  better?: {
-    hex: string;
-    name: string;
-    score: number;
-    image?: string;
-    alternatives: { hex: string; name: string; score: number }[];
-  };
-  rescue?: { image?: string; plan: ReturnType<typeof rescueMakeup>; baselineScore: number };
-  explanation: string;
-  errors: string[];
+
+export interface StylistInput {
+  face: Buffer;
+  body?: Buffer;
+  pieces: { role: PieceRole; image: Buffer }[];
 }
 
 type Emit = (e: AgentEvent) => void;
 
-async function safe<T>(errors: string[], label: string, fn: () => Promise<T>): Promise<T | undefined> {
-  try {
-    return await fn();
-  } catch (e) {
-    errors.push(`${label}: ${e instanceof Error ? e.message : String(e)}`);
-    return undefined;
+/** Layering order for the try-on chain. */
+const LAYER_ORDER: PieceRole[] = ["top", "bottom", "jacket"];
+/** Pieces that sit next to the face and so affect skin/colour harmony most. */
+const FACE_ADJACENT: PieceRole[] = ["top", "jacket"];
+
+/**
+ * ROUGH estimate of YouCam units per live (uncached) call. These are placeholders, not published prices:
+ * adjust once real billing is known. Cache hits cost nothing and are excluded.
+ */
+export const UNITS_PER_CALL: Record<CallInfo["api"], number> = { skin: 1, tone: 1, vto: 1, makeup: 1 };
+
+const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const toBuffer = (dataUrl: string) => Buffer.from(dataUrl.split(",")[1] ?? "", "base64");
+
+export async function runStylist(input: StylistInput, emit: Emit): Promise<AnalysisResult> {
+  const { face, body } = input;
+  if (!input.pieces.length) throw new InputError("Add at least one garment (top, bottom or jacket).");
+  if (input.pieces.some((p) => p.role === "bottom") && !body) {
+    throw new InputError("Add a full-body photo to try on bottoms");
   }
-}
+  const pieceImages = new Map<PieceRole, Buffer>(input.pieces.map((p) => [p.role, p.image]));
+  const roles = LAYER_ORDER.filter((r) => pieceImages.has(r));
 
-export async function runStylist(selfie: Buffer, garment: Buffer, emit: Emit): Promise<Result> {
   const errors: string[] = [];
-
-  // 1. Perceive: two YouCam analyses in parallel
-  emit({ step: "perceive", status: "running", api: "AI Skin Analysis + skin tone" });
-  const [metrics, tone] = await Promise.all([skinAnalysis(selfie), skinTone(selfie)]);
-  emit({
-    step: "perceive",
-    status: "done",
-    detail: `Skin tone ${tone.skin_color} (${tone.source === "youcam" ? "YouCam Skin Tone API" : "local estimate"}); ${Object.keys(metrics).length} skin metrics`,
+  let units = 0;
+  const track = (): CallOpts => ({
+    onCall: (i) => {
+      if (!i.cached) units += UNITS_PER_CALL[i.api];
+    },
   });
+  const step = (s: StepId, status: AgentEvent["status"], api?: string, detail?: string) =>
+    emit({ step: s, status, ...(api ? { api } : {}), ...(detail ? { detail } : {}) });
 
-  // 2. Garment color
-  emit({ step: "garment", status: "running", detail: "k-means on centre pixels" });
-  const { hex } = await dominantColor(garment);
-  emit({ step: "garment", status: "done", detail: `Dominant colour ${hex}` });
+  // 1. Perceive: two YouCam analyses on the FACE photo, in parallel
+  step("perceive", "running", "AI Skin Analysis + skin tone");
+  const [metrics, tone] = await Promise.all([skinAnalysis(face, track()), skinTone(face, track())]);
+  step(
+    "perceive",
+    "done",
+    undefined,
+    `Skin tone ${tone.skin_color} (${tone.source === "youcam" ? "YouCam Skin Tone API" : "local estimate"}); ${Object.keys(metrics).length} skin metrics`
+  );
+
+  // 2. Garment colours
+  step("garments", "running", undefined, "k-means on centre pixels");
+  const hexes = new Map<PieceRole, string>();
+  await Promise.all(roles.map(async (r) => hexes.set(r, (await dominantColor(pieceImages.get(r)!)).hex)));
+  step("garments", "done", undefined, roles.map((r) => `${PIECE_LABEL[r]} ${hexes.get(r)}`).join(", "));
 
   // 3. Score
-  emit({ step: "score", status: "running", detail: "Flattery engine (colour theory rules)" });
-  const flattery = scoreGarment(hex, tone, metrics);
-  emit({ step: "score", status: "done", detail: `Flattery Score ${flattery.score}/100` });
+  step("score", "running", undefined, "Explainable rules per piece");
+  const outfit: OutfitScore = scoreOutfit(
+    roles.map((r) => ({ role: r, hex: hexes.get(r)! })),
+    tone,
+    metrics
+  );
+  step("score", "done", undefined, `Outfit score ${outfit.score}/100`);
 
   // 4. Decide
-  const verdict = flattery.score >= 70 ? "buy" : "fix";
-  emit({
-    step: "decide",
-    status: "done",
-    detail: verdict === "buy" ? "Buy with confidence" : "Below 70 - planning fixes",
-  });
+  step("decide", "done", undefined, outfit.verdict === "buy" ? "Buy with confidence" : "Below 70 - planning fixes");
 
-  // Original try-on (needed in both branches for the side-by-side)
-  const originalTryOn = await safe(errors, "Clothes try-on", () => clothesTryOn(selfie, garment));
+  // 5. Layered try-on: top -> bottom -> jacket; each stage's output is the next person image
+  const photoNotes: string[] = [];
+  if (!body) photoNotes.push("No body photo: chest-up try-on only");
+  step("tryon", "running", "AI Clothes Virtual Try-On", `${roles.length} piece(s), layered`);
+  const stages: TryOnStage[] = [];
+  let person = body ?? face;
+  const worn: PieceRole[] = [];
+  for (const role of roles) {
+    worn.push(role);
+    const label = stages.length === 0 ? PIECE_LABEL[role] : `+ ${PIECE_LABEL[role]}`;
+    try {
+      const image = await clothesTryOn(person, pieceImages.get(role)!, GARMENT_CATEGORY[role], track());
+      stages.push({ label, roles: [...worn], image });
+      person = toBuffer(image);
+    } catch (e) {
+      errors.push(`Try-on (${PIECE_LABEL[role]}): ${msg(e)}`);
+      stages.push({ label, roles: [...worn] });
+    }
+  }
+  const okStages = stages.filter((s) => s.image).length;
+  step("tryon", okStages === 0 ? "error" : "done", undefined, `${okStages}/${stages.length} stages rendered`);
 
-  const result: Result = { garmentHex: hex, metrics, tone, flattery, verdict, originalTryOn, explanation: "", errors };
+  let better: AnalysisResult["better"];
+  let rescue: AnalysisResult["rescue"];
 
-  if (verdict === "fix") {
-    // 4a. Recolor path
-    emit({
-      step: "recolor",
-      status: "running",
-      api: "AI Clothes Virtual Try-On",
-      detail: "Re-colouring garment locally, ranking colourways",
-    });
-    const ways = bestColorways(hex, tone, metrics, 3);
-    const top = ways[0];
-    result.better = { hex: top.hex, name: top.name, score: top.score, alternatives: ways };
-    const recolored = await safe(errors, "Recolor", () => recolorGarment(garment, hex, top.hex));
-    if (recolored)
-      result.better.image = await safe(errors, "Clothes try-on (better colour)", () => clothesTryOn(selfie, recolored));
-    emit({
-      step: "recolor",
-      status: result.better.image ? "done" : "error",
-      detail: `Best: ${top.name} ${top.hex} scores ${top.score}`,
-    });
+  if (outfit.verdict === "fix") {
+    // 6. Recolor the weakest face-adjacent piece that has a counterfactual
+    step("recolor", "running", "AI Clothes Virtual Try-On", "Re-colouring the weakest piece locally");
+    const candidates = outfit.pieces
+      .filter((p) => FACE_ADJACENT.includes(p.role) && p.counterfactuals.length > 0)
+      .sort((a, b) => a.score - b.score);
+    const target: PieceScore | undefined = candidates[0];
+    if (!target) {
+      step("recolor", "skipped", undefined, "No face-adjacent piece with a better colour");
+    } else {
+      const cf = [...target.counterfactuals].sort((a, b) => b.score - a.score)[0];
+      const b: NonNullable<AnalysisResult["better"]> = {
+        role: target.role,
+        hex: cf.hex,
+        name: cf.name,
+        score: cf.score,
+      };
+      better = b;
+      try {
+        const recolored = await recolorGarment(pieceImages.get(target.role)!, target.hex, cf.hex);
+        b.image = await clothesTryOn(face, recolored, GARMENT_CATEGORY[target.role], track());
+      } catch (e) {
+        errors.push(`Recolor try-on: ${msg(e)}`);
+      }
+      step(
+        "recolor",
+        b.image ? "done" : "error",
+        undefined,
+        `${PIECE_LABEL[target.role]} in ${cf.name.toLowerCase()} ${cf.hex} scores ${cf.score}`
+      );
+    }
 
-    // 4b. Rescue path: makeup on top of the try-on (fall back to the selfie)
-    emit({
-      step: "rescue",
-      status: "running",
-      api: "AI Makeup Virtual Try-On",
-      detail: "Lip + blush + concealer chosen against your top concern",
-    });
-    const plan = rescueMakeup(flattery);
-    const base = originalTryOn ? Buffer.from(originalTryOn.split(",")[1], "base64") : selfie;
-    const img = await safe(errors, "Makeup try-on", () => makeupTryOn(base, plan));
-    result.rescue = { image: img, plan, baselineScore: flattery.score };
-    emit({ step: "rescue", status: img ? "done" : "error", detail: plan.note });
+    // 7. Rescue: face-adjacent pieces on the face photo, then makeup on top; never aborts the run
+    const plan = rescueMakeupFor(outfit);
+    step("rescue", "running", "AI Makeup Virtual Try-On", plan.note);
+    let rescueBase: Buffer = face;
+    try {
+      const adj = roles.filter((r) => FACE_ADJACENT.includes(r));
+      const last = stages[stages.length - 1];
+      if (!body && last?.image) {
+        rescueBase = toBuffer(last.image); // the base person was the face photo: reuse the stage image
+      } else if (adj.length > 0) {
+        let p = face;
+        for (const r of adj) p = toBuffer(await clothesTryOn(p, pieceImages.get(r)!, GARMENT_CATEGORY[r], track()));
+        rescueBase = p;
+      }
+    } catch (e) {
+      errors.push(`Rescue try-on: ${msg(e)}`);
+      rescueBase = face;
+    }
+    let image: string | undefined;
+    try {
+      image = await makeupTryOn(rescueBase, plan, track());
+    } catch (e) {
+      errors.push(`Makeup try-on: ${msg(e)}`);
+    }
+    rescue = { image, plan, baselineScore: outfit.score };
+    step("rescue", image ? "done" : "error", undefined, plan.note);
   } else {
-    emit({ step: "recolor", status: "skipped" });
-    emit({ step: "rescue", status: "skipped" });
+    step("recolor", "skipped");
+    step("rescue", "skipped");
   }
 
-  // 5. Explain
-  emit({ step: "explain", status: "running", api: process.env.ANTHROPIC_API_KEY ? "Claude" : "templated" });
-  result.explanation = await explain(result);
-  emit({ step: "explain", status: "done" });
-  return result;
+  // 8. Makeup tips
+  step("tips", "running", undefined, "Matching tips to your skin and the colours");
+  let tips: AnalysisResult["makeupTips"] = [];
+  try {
+    tips = makeupTips(outfit, tone, metrics);
+  } catch (e) {
+    errors.push(`Makeup tips: ${msg(e)}`);
+  }
+  step("tips", "done", undefined, `${tips.length} tips`);
+
+  // 9. Explain
+  step("explain", "running", process.env.ANTHROPIC_API_KEY ? "Claude" : "templated");
+  const explanation = await explain(outfit, better, rescue);
+  step("explain", "done");
+
+  return {
+    metrics,
+    tone,
+    outfit,
+    stages,
+    better,
+    rescue,
+    makeupTips: tips,
+    explanation,
+    photoNotes,
+    unitsEstimate: units,
+    errors,
+  };
 }
 
-function templated(r: Result) {
-  const why = r.flattery.reasons[0]?.text ?? "";
-  if (r.verdict === "buy") return `Good news: ${why} Go ahead and buy it.`;
-  return `${why} ${r.better ? `Try it in ${r.better.name.toLowerCase()} (${r.better.score}/100 for you), or keep this shirt and use the suggested makeup to rebalance.` : ""}`.trim();
+function templated(outfit: OutfitScore, better: AnalysisResult["better"]) {
+  const why = outfit.summary[0] ?? "";
+  if (outfit.verdict === "buy") return `Good news: ${why} Go ahead and buy it.`;
+  const alt = better
+    ? `Try the ${PIECE_LABEL[better.role].toLowerCase()} in ${better.name.toLowerCase()} (${better.score}/100 for you), or keep it and use the suggested makeup to rebalance.`
+    : "";
+  return `${why} ${alt}`.trim();
 }
 
-async function explain(r: Result): Promise<string> {
+async function explain(
+  outfit: OutfitScore,
+  better: AnalysisResult["better"],
+  rescue: AnalysisResult["rescue"]
+): Promise<string> {
   const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return templated(r);
+  if (!key) return templated(outfit, better);
   try {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -139,11 +245,11 @@ async function explain(r: Result): Promise<string> {
             role: "user",
             content: `Write a friendly 2-sentence verdict for a shopper. Do not invent numbers or claim precise optical effects; use words like "can" and "tends to". Data: ${JSON.stringify(
               {
-                score: r.flattery.score,
-                verdict: r.verdict,
-                reasons: r.flattery.reasons.map((x) => x.text),
-                betterColour: r.better && { name: r.better.name, score: r.better.score },
-                makeupNote: r.rescue?.plan.note,
+                score: outfit.score,
+                verdict: outfit.verdict,
+                summary: outfit.summary,
+                betterColour: better && { piece: better.role, name: better.name, score: better.score },
+                makeupNote: rescue?.plan.note,
               }
             )}`,
           },
@@ -151,8 +257,8 @@ async function explain(r: Result): Promise<string> {
       }),
     });
     const j = (await res.json()) as { content?: { text?: string }[] };
-    return j.content?.[0]?.text?.trim() || templated(r);
+    return j.content?.[0]?.text?.trim() || templated(outfit, better);
   } catch {
-    return templated(r);
+    return templated(outfit, better);
   }
 }

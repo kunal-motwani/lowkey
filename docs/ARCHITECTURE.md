@@ -1,6 +1,6 @@
 # Architecture
 
-Flattr is a Next.js 15 (App Router, TypeScript) app. A single API route runs a "Stylist Agent" that streams progress to the browser over Server-Sent Events.
+Flattr is a Next.js 15 (App Router, TypeScript) app. A single API route runs a multi-piece "Stylist Agent" that streams progress to the browser over Server-Sent Events.
 
 ## Components
 
@@ -10,7 +10,8 @@ flowchart TB
   R -- SSE: step / result / fail --> UI
   R --> A[lib/agent.ts runStylist]
   A --> Y[lib/youcam.ts]
-  A --> F[lib/flattery.ts]
+  A --> F[lib/outfit.ts + lib/flattery.ts]
+  A --> MT[lib/makeup-tips.ts]
   A --> C[lib/color.ts]
   Y --> TL[lib/tone-local.ts]
   Y <--> K[(Disk cache)]
@@ -20,14 +21,17 @@ flowchart TB
 
 | Module | Responsibility |
 |---|---|
-| `app/api/analyze/route.ts` | Parses the form, loads images (upload, URL or sample), runs the agent, emits SSE |
-| `lib/agent.ts` | Orchestrates steps; each external call is isolated so partial failures degrade gracefully |
+| `app/api/analyze/route.ts` | Parses the form (face, body, per-role pieces), loads images (upload, URL or sample), runs the agent, emits SSE |
+| `lib/agent.ts` | Orchestrates the steps and layered try-on; each external call is isolated so partial failures degrade gracefully |
 | `lib/youcam.ts` | Typed client: File API upload, create task, poll; key selection; cache |
-| `lib/flattery.ts` | Deterministic scoring rules, colourway ranking, makeup plan |
+| `lib/flattery.ts`, `lib/outfit.ts` | Deterministic per-piece scoring rules, outfit score, colourway counterfactuals, rescue makeup plan |
+| `lib/makeup-tips.ts` | Actionable makeup tips from the outfit, tone and skin metrics |
 | `lib/color.ts` | RGB/LAB/HSL maths, dominant colour (k-means via sharp), garment recolouring |
 | `lib/tone-local.ts` | Local skin-tone estimate when Skin Tone Analysis is unavailable |
 
 ## Agent sequence
+
+Steps: perceive, garments, score, decide, tryon, recolor, rescue, tips, explain. Skin analysis and tone run on the **face** photo; the try-on chain starts from the **body** photo when there is one, otherwise from the face photo (chest-up only).
 
 ```mermaid
 sequenceDiagram
@@ -35,22 +39,29 @@ sequenceDiagram
   participant Route
   participant Agent
   participant YouCam
-  UI->>Route: POST /api/analyze
-  Route->>Agent: runStylist(selfie, garment)
-  Agent->>YouCam: Skin Analysis + Skin Tone (parallel)
-  Agent-->>UI: step perceive
-  Agent->>Agent: garment colour, score, decide (>= 70 = buy)
-  Agent->>YouCam: Clothes try-on (original)
-  alt score < 70
-    Agent->>Agent: rank colourways, recolour garment
-    Agent->>YouCam: Clothes try-on (better colour)
-    Agent->>YouCam: Makeup try-on (rescue)
+  UI->>Route: POST /api/analyze (face, body?, pieces)
+  Route->>Agent: runStylist({ face, body, pieces })
+  Agent->>YouCam: Skin Analysis + Skin Tone on face (parallel)
+  Agent->>Agent: dominant colour per piece, scoreOutfit, decide (>= 70 = buy)
+  Note over Agent,YouCam: Layering: person = body or face
+  Agent->>YouCam: Try-on top onto person -> stage 1 image
+  Agent->>YouCam: Try-on bottom onto stage 1 -> stage 2 image
+  Agent->>YouCam: Try-on jacket onto stage 2 -> stage 3 image
+  alt verdict is fix
+    Agent->>Agent: recolour weakest face-adjacent piece locally
+    Agent->>YouCam: Try-on recoloured piece on face photo (better)
+    Agent->>YouCam: Try-on face-adjacent pieces on face photo (or reuse stage image)
+    Agent->>YouCam: Makeup try-on with rescue plan (rescue)
   end
-  Agent->>Agent: explain (Anthropic if key set, else template)
+  Agent->>Agent: makeup tips, explain (Anthropic if key set, else template)
   Agent-->>UI: result
 ```
 
-Failures in try-on or makeup steps are recorded in `result.errors` and the rest of the result is still returned. A failure in perceive, garment colour or scoring aborts the run with a `fail` event.
+A failed layering stage records an error and the chain continues from the previous person image. Failures in recolour, rescue or makeup never abort the run; they land in `result.errors`. A failure in perceive, garment colour or scoring aborts with a `fail` event. Bad input (no pieces, a bottom without a body photo) throws `InputError`, whose message is shown to the user.
+
+## Cost and units
+
+Each uncached piece costs one clothes try-on call; the fix path adds a recolour try-on, optional rescue try-ons and one makeup call. `unitsEstimate` sums a constant per live call (`UNITS_PER_CALL` in `lib/agent.ts`) and skips cache hits, which `lib/youcam.ts` reports through an optional `onCall` callback. It is an estimate only. Per the YouCam docs, bottoms need a worn-outfit reference photo and a full-body person photo. `GARMENT_CATEGORY` in `lib/youcam.ts` is the single place to change the category sent per role; its values are unverified until a real run, and the category is part of the try-on cache key.
 
 ## Skin tone fallback
 

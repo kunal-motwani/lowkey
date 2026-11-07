@@ -173,3 +173,121 @@ body {
     transition: none !important;
   }
 }
+
+/* ---------- Wizard + explainable result ---------- */
+.wiz-progress {
+  display: flex;
+  gap: 0.25rem;
+  justify-content: space-between;
+}
+.wiz-dot {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.wiz-dot-n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 9999px;
+  border: 2px solid var(--line);
+  font-weight: 700;
+  font-size: 0.8rem;
+}
+.wiz-dot-current {
+  color: var(--fg);
+  font-weight: 700;
+}
+.wiz-dot-current .wiz-dot-n {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.wiz-dot-done .wiz-dot-n {
+  border-color: var(--good);
+  color: var(--good);
+}
+.wiz-checklist {
+  margin: 0.6rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.875rem;
+  list-style: disc;
+}
+.wiz-nav {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 0;
+  background: linear-gradient(transparent, var(--bg) 35%);
+}
+.wf-alert {
+  border: 1px solid var(--bad);
+  color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 10%, transparent);
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+  font-size: 0.875rem;
+}
+.wf-track {
+  position: relative;
+  height: 0.75rem;
+  margin-top: 0.4rem;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  overflow: hidden;
+}
+.wf-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 9999px;
+  transition: width 0.4s ease;
+}
+.wf-bar-base {
+  background: color-mix(in srgb, var(--fg) 45%, transparent);
+}
+.wf-bar-final {
+  background: var(--accent);
+}
+.wf-bar-up {
+  background: var(--good);
+}
+.wf-bar-down {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--bad) 0 4px,
+    color-mix(in srgb, var(--bad) 55%, var(--card)) 4px 8px
+  );
+}
+.wf-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.wf-up {
+  color: var(--good);
+}
+.wf-down {
+  color: var(--bad);
+}
+.wf-flat {
+  color: var(--muted);
+}
+.wf-rule {
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+}
+.wf-muted {
+  opacity: 0.7;
+}
